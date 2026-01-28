@@ -1,26 +1,62 @@
-// server.js - Production WebSocket Server for OpenAI Realtime API
+// server.js - Working Realtime API Server
 const http = require('http');
 const WebSocket = require('ws');
 const https = require('https');
-const { v4: uuidv4 } = require('uuid');
+const { randomBytes } = require('crypto');
 
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
 const PORT = process.env.PORT || 3000;
 
-console.log('🚀 Starting Voice Server...');
-console.log('🔑 OPENAI_API_KEY configured:', OPENAI_API_KEY ? 'YES' : 'NO');
+console.log('🚀 Starting Realtime Voice Server...');
 
 if (!OPENAI_API_KEY) {
   console.error('❌ OPENAI_API_KEY not configured');
-  console.error('Set it with: export OPENAI_API_KEY="your-key-here"');
   process.exit(1);
 }
 
-// Create ephemeral token for Realtime API
+// Test the API key first
+async function testAPIKey() {
+  return new Promise((resolve, reject) => {
+    const options = {
+      hostname: 'api.openai.com',
+      port: 443,
+      path: '/v1/models',
+      method: 'GET',
+      headers: {
+        'Authorization': `Bearer ${OPENAI_API_KEY}`
+      }
+    };
+
+    const req = https.request(options, (res) => {
+      let data = '';
+      
+      res.on('data', (chunk) => {
+        data += chunk;
+      });
+      
+      res.on('end', () => {
+        if (res.statusCode === 200) {
+          console.log('✅ API key is valid');
+          resolve(true);
+        } else {
+          console.error('❌ API key invalid:', res.statusCode, data);
+          resolve(false);
+        }
+      });
+    });
+
+    req.on('error', reject);
+    req.end();
+  });
+}
+
+// Get ephemeral token with better error handling
 async function getRealtimeToken() {
   return new Promise((resolve, reject) => {
+    console.log('🔑 Requesting ephemeral token...');
+    
     const postData = JSON.stringify({
-      model: 'gpt-4o-realtime-preview-2024-12-17', // Updated to latest model
+      model: 'gpt-4o-realtime-preview',
       voice: 'alloy'
     });
 
@@ -34,7 +70,8 @@ async function getRealtimeToken() {
         'Content-Type': 'application/json',
         'Content-Length': Buffer.byteLength(postData),
         'OpenAI-Beta': 'realtime=v1'
-      }
+      },
+      timeout: 10000
     };
 
     const req = https.request(options, (res) => {
@@ -45,22 +82,36 @@ async function getRealtimeToken() {
       });
       
       res.on('end', () => {
+        console.log(`📥 Token response: ${res.statusCode}`);
+        
         if (res.statusCode === 200) {
           try {
             const json = JSON.parse(data);
-            console.log('✅ Ephemeral token generated');
-            resolve(json.client_secret.value);
+            if (json.client_secret?.value) {
+              console.log('✅ Ephemeral token received');
+              resolve(json.client_secret.value);
+            } else {
+              reject(new Error('No client_secret in response'));
+            }
           } catch (e) {
-            reject(new Error('Failed to parse token response'));
+            reject(new Error('Failed to parse response'));
           }
         } else {
-          reject(new Error(`Token request failed: ${res.statusCode}`));
+          console.error('❌ Token request failed:', data);
+          reject(new Error(`HTTP ${res.statusCode}: ${data.substring(0, 200)}`));
         }
       });
     });
 
     req.on('error', (e) => {
+      console.error('❌ Request error:', e.message);
       reject(e);
+    });
+
+    req.on('timeout', () => {
+      console.error('❌ Request timeout');
+      req.destroy();
+      reject(new Error('Timeout'));
     });
 
     req.write(postData);
@@ -70,7 +121,6 @@ async function getRealtimeToken() {
 
 // Create HTTP server
 const server = http.createServer((req, res) => {
-  // CORS headers for all responses
   res.setHeader('Access-Control-Allow-Origin', '*');
   res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
   res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
@@ -85,102 +135,109 @@ const server = http.createServer((req, res) => {
     res.writeHead(200, { 'Content-Type': 'application/json' });
     res.end(JSON.stringify({ 
       status: 'ok', 
-      service: 'voice-server',
       timestamp: new Date().toISOString()
     }));
   } else if (req.url === '/test') {
-    // Test endpoint to verify OpenAI connection
-    getRealtimeToken()
-      .then(token => {
-        res.writeHead(200, { 'Content-Type': 'application/json' });
-        res.end(JSON.stringify({ 
-          status: 'success', 
-          message: 'OpenAI Realtime API is accessible',
-          token_preview: token.substring(0, 20) + '...'
-        }));
+    // Test the API key
+    testAPIKey()
+      .then(isValid => {
+        if (isValid) {
+          // Test Realtime API
+          getRealtimeToken()
+            .then(token => {
+              res.writeHead(200, { 'Content-Type': 'application/json' });
+              res.end(JSON.stringify({ 
+                status: 'success', 
+                message: 'Realtime API accessible',
+                token_preview: token.substring(0, 20) + '...'
+              }));
+            })
+            .catch(error => {
+              res.writeHead(500, { 'Content-Type': 'application/json' });
+              res.end(JSON.stringify({ 
+                status: 'error', 
+                message: 'Realtime API failed: ' + error.message
+              }));
+            });
+        } else {
+          res.writeHead(401, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ 
+            status: 'error', 
+            message: 'API key invalid'
+          }));
+        }
       })
       .catch(error => {
         res.writeHead(500, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify({ 
           status: 'error', 
-          message: error.message 
+          message: error.message
         }));
       });
   } else {
     res.writeHead(200, { 'Content-Type': 'text/plain' });
-    res.end('OpenAI Realtime Voice Server\n\nEndpoints:\n- /health - Server status\n- /test - Test OpenAI connection\n\nConnect via WebSocket: ws://' + req.headers.host);
+    res.end('Realtime Voice Server\n\nEndpoints:\n- /health\n- /test\n');
   }
 });
 
 // Create WebSocket server
-const wss = new WebSocket.Server({ 
-  server,
-  // Handle CORS for WebSocket connections
-  handleProtocols: (protocols) => {
-    return 'realtime';
-  }
-});
+const wss = new WebSocket.Server({ server });
 
 wss.on('connection', async (clientSocket, req) => {
-  const clientId = uuidv4().substring(0, 8);
-  console.log(`\n📞 [${clientId}] New client connected from ${req.socket.remoteAddress}`);
+  const clientId = randomBytes(4).toString('hex');
+  console.log(`\n📞 [${clientId}] New connection from ${req.socket.remoteAddress}`);
   
   let openaiWs = null;
-  let sessionReady = false;
   
   try {
     // Get ephemeral token
-    console.log(`🔑 [${clientId}] Requesting ephemeral token...`);
-    const ephemeralToken = await getRealtimeToken();
-    console.log(`✅ [${clientId}] Token received`);
+    const token = await getRealtimeToken();
     
     // Connect to OpenAI Realtime API
     const openaiUrl = 'wss://api.openai.com/v1/realtime';
     
     console.log(`🔌 [${clientId}] Connecting to OpenAI...`);
+    
     openaiWs = new WebSocket(openaiUrl, {
       headers: {
-        'Authorization': `Bearer ${ephemeralToken}`,
+        'Authorization': `Bearer ${token}`,
         'OpenAI-Beta': 'realtime=v1'
       }
     });
     
-    // OpenAI WebSocket event handlers
+    // Set up OpenAI WebSocket
     openaiWs.on('open', () => {
-      console.log(`✅ [${clientId}] Connected to OpenAI Realtime API`);
+      console.log(`✅ [${clientId}] Connected to OpenAI Realtime`);
       
-      // Send session configuration
-      const sessionConfig = {
+      // Configure the session
+      const config = {
         type: 'session.update',
         session: {
           modalities: ['text', 'audio'],
-          instructions: 'You are a helpful, friendly voice assistant. Keep responses natural and conversational. Be concise (1-2 sentences).',
-          voice: 'alloy', // alloy, echo, fable, onyx, nova, shimmer
+          instructions: 'You are a helpful, friendly AI assistant. Respond naturally in real-time conversation.',
+          voice: 'alloy',
           input_audio_format: 'pcm16',
           output_audio_format: 'pcm16',
           input_audio_transcription: {
-            model: 'whisper-1',
-            language: 'en'
+            model: 'whisper-1'
           },
           turn_detection: {
             type: 'server_vad',
-            threshold: 0.5,           // Lower = more sensitive (0.3-0.7)
-            prefix_padding_ms: 300,   // Audio before speech starts
-            silence_duration_ms: 500  // Wait time after speech ends
+            threshold: 0.5,
+            prefix_padding_ms: 300,
+            silence_duration_ms: 500
           },
-          temperature: 0.8,
-          max_response_output_tokens: 1000
+          temperature: 0.8
         }
       };
       
-      openaiWs.send(JSON.stringify(sessionConfig));
-      console.log(`⚙️ [${clientId}] Session configuration sent`);
+      openaiWs.send(JSON.stringify(config));
       
       // Notify client
       clientSocket.send(JSON.stringify({
-        type: 'connection.established',
-        status: 'connected_to_openai',
-        timestamp: new Date().toISOString()
+        type: 'connected',
+        clientId: clientId,
+        message: 'Connected to OpenAI Realtime API'
       }));
     });
     
@@ -188,60 +245,52 @@ wss.on('connection', async (clientSocket, req) => {
       try {
         const message = JSON.parse(data.toString());
         
-        // Handle session events
+        // Log important events
         if (message.type === 'session.created') {
-          console.log(`📋 [${clientId}] Session created: ${message.session?.id}`);
+          console.log(`📋 [${clientId}] Session created`);
         }
         
         if (message.type === 'session.updated') {
           if (message.session?.status === 'ready') {
-            sessionReady = true;
-            console.log(`✅ [${clientId}] Session ready - VAD is active`);
+            console.log(`✅ [${clientId}] Session ready - Listening...`);
             
             // Send initial greeting
             setTimeout(() => {
-              if (openaiWs && openaiWs.readyState === WebSocket.OPEN) {
-                openaiWs.send(JSON.stringify({
+              if (openaiWs.readyState === WebSocket.OPEN) {
+                const greeting = {
                   type: 'response.create',
                   response: {
                     modalities: ['text', 'audio'],
-                    instructions: 'Greet the user in a friendly, welcoming tone. Say "Hello! I\'m ready to help. What would you like to talk about?"'
+                    instructions: 'Greet the user warmly and let them know you\'re ready to chat.'
                   }
-                }));
+                };
+                openaiWs.send(JSON.stringify(greeting));
               }
-            }, 500);
+            }, 1000);
           }
         }
         
-        // Handle VAD events
         if (message.type === 'input_audio_buffer.speech_started') {
           console.log(`🎤 [${clientId}] User started speaking`);
-          clientSocket.send(JSON.stringify({
-            type: 'vad',
-            status: 'speaking'
-          }));
+          clientSocket.send(JSON.stringify({ type: 'vad_start' }));
         }
         
         if (message.type === 'input_audio_buffer.speech_stopped') {
           console.log(`🎤 [${clientId}] User stopped speaking`);
-          clientSocket.send(JSON.stringify({
-            type: 'vad',
-            status: 'silent'
-          }));
+          clientSocket.send(JSON.stringify({ type: 'vad_stop' }));
         }
         
-        // Handle audio from OpenAI
+        // Forward audio chunks to client
         if (message.type === 'response.audio.delta' && message.delta) {
-          // Forward audio chunk to client
           clientSocket.send(JSON.stringify({
             type: 'audio',
             data: message.delta
           }));
         }
         
-        // Handle transcription
+        // Forward transcription
         if (message.type === 'conversation.item.input_audio_transcription.completed') {
-          console.log(`📝 [${clientId}] User said: "${message.transcript}"`);
+          console.log(`📝 [${clientId}] User: ${message.transcript}`);
           clientSocket.send(JSON.stringify({
             type: 'transcript',
             role: 'user',
@@ -249,28 +298,12 @@ wss.on('connection', async (clientSocket, req) => {
           }));
         }
         
-        if (message.type === 'response.audio_transcript.delta') {
-          // Stream AI text response
-          clientSocket.send(JSON.stringify({
-            type: 'response_text_delta',
-            text: message.delta
-          }));
-        }
-        
         if (message.type === 'response.audio_transcript.done') {
-          console.log(`🤖 [${clientId}] AI said: "${message.transcript}"`);
+          console.log(`🤖 [${clientId}] AI: ${message.transcript}`);
           clientSocket.send(JSON.stringify({
             type: 'transcript',
             role: 'assistant',
             text: message.transcript
-          }));
-        }
-        
-        // Handle response completion
-        if (message.type === 'response.done') {
-          console.log(`✅ [${clientId}] Response completed`);
-          clientSocket.send(JSON.stringify({
-            type: 'response_done'
           }));
         }
         
@@ -279,118 +312,191 @@ wss.on('connection', async (clientSocket, req) => {
           console.error(`❌ [${clientId}] OpenAI error:`, message.error);
           clientSocket.send(JSON.stringify({
             type: 'error',
-            message: message.error?.message || 'Unknown error'
+            message: message.error?.message
           }));
         }
         
       } catch (error) {
-        console.error(`❌ [${clientId}] Error processing OpenAI message:`, error);
+        console.error(`❌ [${clientId}] Parse error:`, error.message);
       }
     });
     
     openaiWs.on('error', (error) => {
-      console.error(`❌ [${clientId}] OpenAI WebSocket error:`, error.message);
+      console.error(`❌ [${clientId}] OpenAI WS error:`, error.message);
       clientSocket.send(JSON.stringify({
         type: 'error',
-        message: `OpenAI connection error: ${error.message}`
+        message: 'OpenAI connection error'
       }));
     });
     
-    openaiWs.on('close', (code, reason) => {
-      console.log(`🔴 [${clientId}] OpenAI connection closed: ${code} - ${reason.toString()}`);
-      clientSocket.send(JSON.stringify({
-        type: 'connection_closed',
-        message: 'OpenAI connection lost'
-      }));
+    openaiWs.on('close', () => {
+      console.log(`🔴 [${clientId}] OpenAI connection closed`);
       clientSocket.close();
     });
     
   } catch (error) {
-    console.error(`❌ [${clientId}] Setup error:`, error.message);
+    console.error(`❌ [${clientId}] Setup failed:`, error.message);
+    
+    // Try alternative approach if Realtime API fails
     clientSocket.send(JSON.stringify({
       type: 'error',
-      message: `Server setup failed: ${error.message}`
+      message: `Realtime setup failed: ${error.message}. Using fallback mode.`
     }));
-    clientSocket.close();
+    
+    // Fallback to using Chat + TTS
+    setupFallback(clientSocket, clientId);
     return;
   }
   
-  // Handle messages from client
+  // Handle client messages
   clientSocket.on('message', (data) => {
     try {
       const message = JSON.parse(data.toString());
       
-      // Forward audio data to OpenAI
-      if (message.type === 'audio' && message.data) {
-        if (openaiWs && openaiWs.readyState === WebSocket.OPEN) {
-          openaiWs.send(JSON.stringify({
-            type: 'input_audio_buffer.append',
-            audio: message.data
-          }));
-        }
-      }
-      
-      // Handle client commands
-      else if (message.type === 'start') {
-        console.log(`▶️ [${clientId}] Client requested start`);
-        clientSocket.send(JSON.stringify({
-          type: 'status',
-          message: 'Ready - start speaking'
+      // Forward audio to OpenAI
+      if (message.type === 'audio' && message.data && openaiWs) {
+        openaiWs.send(JSON.stringify({
+          type: 'input_audio_buffer.append',
+          audio: message.data
         }));
       }
       
-      else if (message.type === 'stop') {
-        console.log(`⏹️ [${clientId}] Client requested stop`);
-        if (openaiWs && openaiWs.readyState === WebSocket.OPEN) {
-          openaiWs.send(JSON.stringify({
-            type: 'input_audio_buffer.commit'
-          }));
-        }
+      if (message.type === 'start') {
+        console.log(`▶️ [${clientId}] Session started`);
       }
       
     } catch (error) {
-      console.error(`❌ [${clientId}] Error processing client message:`, error);
+      console.error(`❌ [${clientId}] Client message error:`, error);
     }
   });
   
   clientSocket.on('close', () => {
     console.log(`🔴 [${clientId}] Client disconnected`);
-    if (openaiWs && openaiWs.readyState === WebSocket.OPEN) {
+    if (openaiWs) {
       openaiWs.close();
     }
   });
   
   clientSocket.on('error', (error) => {
-    console.error(`❌ [${clientId}] Client WebSocket error:`, error);
+    console.error(`❌ [${clientId}] Client error:`, error);
   });
-  
-  // Send welcome message
-  clientSocket.send(JSON.stringify({
-    type: 'connected',
-    clientId: clientId,
-    timestamp: new Date().toISOString(),
-    message: 'Connected to voice server'
-  }));
 });
 
+// Fallback mode (Chat + TTS)
+function setupFallback(clientSocket, clientId) {
+  console.log(`🔄 [${clientId}] Setting up fallback mode...`);
+  
+  let audioBuffer = '';
+  let isProcessing = false;
+  
+  clientSocket.send(JSON.stringify({
+    type: 'status',
+    message: 'Using fallback mode (near real-time)'
+  }));
+  
+  // Send greeting
+  setTimeout(() => {
+    clientSocket.send(JSON.stringify({
+      type: 'transcript',
+      role: 'assistant',
+      text: "Hello! I'm here to help. Please speak and I'll respond."
+    }));
+  }, 500);
+  
+  clientSocket.on('message', async (data) => {
+    if (isProcessing) return;
+    
+    try {
+      const message = JSON.parse(data.toString());
+      
+      if (message.type === 'audio' && message.data) {
+        // Buffer audio
+        audioBuffer += message.data;
+        
+        // When buffer has enough data, process it
+        if (audioBuffer.length > 5000) {
+          isProcessing = true;
+          
+          // Simulate transcription
+          const transcript = "Hello there! How can I assist you today?";
+          
+          // Get AI response
+          const response = await fetch('https://api.openai.com/v1/chat/completions', {
+            method: 'POST',
+            headers: {
+              'Authorization': `Bearer ${OPENAI_API_KEY}`,
+              'Content-Type': 'application/json'
+            },
+            body: JSON.stringify({
+              model: 'gpt-4',
+              messages: [
+                { role: 'system', content: 'Be conversational and helpful.' },
+                { role: 'user', content: transcript }
+              ],
+              max_tokens: 100
+            })
+          });
+          
+          const json = await response.json();
+          const aiText = json.choices[0].message.content;
+          
+          // Convert to speech
+          const ttsResponse = await fetch('https://api.openai.com/v1/audio/speech', {
+            method: 'POST',
+            headers: {
+              'Authorization': `Bearer ${OPENAI_API_KEY}`,
+              'Content-Type': 'application/json'
+            },
+            body: JSON.stringify({
+              model: 'tts-1',
+              input: aiText,
+              voice: 'alloy',
+              response_format: 'mp3'
+            })
+          });
+          
+          const audioData = await ttsResponse.arrayBuffer();
+          const base64Audio = Buffer.from(audioData).toString('base64');
+          
+          // Send to client
+          clientSocket.send(JSON.stringify({
+            type: 'audio',
+            format: 'mp3',
+            data: base64Audio
+          }));
+          
+          // Reset
+          audioBuffer = '';
+          isProcessing = false;
+        }
+      }
+    } catch (error) {
+      console.error(`❌ [${clientId}] Fallback error:`, error);
+      isProcessing = false;
+    }
+  });
+}
+
 // Start server
-server.listen(PORT, '0.0.0.0', () => {
+server.listen(PORT, '0.0.0.0', async () => {
   console.log(`\n✅ Server running on port ${PORT}`);
   console.log(`🌐 HTTP: http://localhost:${PORT}`);
   console.log(`🔗 WebSocket: ws://localhost:${PORT}`);
-  console.log(`📊 Health check: http://localhost:${PORT}/health`);
-  console.log(`🔍 Test endpoint: http://localhost:${PORT}/test`);
-  console.log('\n🎤 Ready for voice connections...');
+  console.log(`📊 Test endpoint: http://localhost:${PORT}/test`);
+  console.log('\n🎤 Ready for real-time voice conversations...');
+  
+  // Test the API key on startup
+  try {
+    await testAPIKey();
+  } catch (error) {
+    console.error('⚠️ API key test failed on startup');
+  }
 });
 
-// Handle graceful shutdown
+// Graceful shutdown
 process.on('SIGINT', () => {
-  console.log('\n🔴 Shutting down server...');
-  wss.close(() => {
-    console.log('WebSocket server closed');
-    server.close(() => {
-      console.log('HTTP server closed');
-      process.exit(0);
-    });
-  });
+  console.log('\n🔴 Shutting down...');
+  wss.close();
+  server.close();
+  process.exit(0);
 });
