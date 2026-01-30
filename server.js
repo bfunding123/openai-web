@@ -115,18 +115,18 @@ wss.on('connection', async (clientSocket, req) => {
     openaiWs.on('open', () => {
       console.log(`✅ [${clientId}] Connected to OpenAI`);
       
-      // Configure session
+      // Configure session with English as default
       openaiWs.send(JSON.stringify({
         type: 'session.update',
         session: {
           modalities: ['text', 'audio'],
-          instructions: 'You are a helpful, friendly AI assistant. Respond naturally in conversation.',
+          instructions: 'You are a helpful, friendly AI assistant. Always respond in English. Keep responses concise and natural.',
           voice: 'alloy',
           input_audio_format: 'pcm16',
           output_audio_format: 'pcm16',
           input_audio_transcription: {
             model: 'whisper-1',
-            language: 'en'
+            language: 'en' // Set English as default language
           },
           turn_detection: {
             type: 'server_vad',
@@ -140,7 +140,9 @@ wss.on('connection', async (clientSocket, req) => {
       
       clientSocket.send(JSON.stringify({
         type: 'connected',
-        message: 'Connected to OpenAI'
+        message: 'Connected to OpenAI',
+        language: 'en',
+        voice: 'alloy'
       }));
     });
     
@@ -150,7 +152,7 @@ wss.on('connection', async (clientSocket, req) => {
         
         // Session ready - process queue
         if (message.type === 'session.updated') {
-          console.log(`✅ [${clientId}] Session ready`);
+          console.log(`✅ [${clientId}] Session ready (English language mode)`);
           isReady = true;
           
           // Process queued messages
@@ -160,14 +162,14 @@ wss.on('connection', async (clientSocket, req) => {
             handleClientMessage(queuedMsg);
           }
           
-          // Send greeting
+          // Send English greeting
           setTimeout(() => {
             if (openaiWs.readyState === WebSocket.OPEN) {
               openaiWs.send(JSON.stringify({
                 type: 'response.create',
                 response: {
                   modalities: ['text', 'audio'],
-                  instructions: 'Greet the user warmly.'
+                  instructions: 'Greet the user in English. Welcome them to the conversation.'
                 }
               }));
             }
@@ -189,26 +191,29 @@ wss.on('connection', async (clientSocket, req) => {
         if (message.type === 'response.audio.delta' && message.delta) {
           clientSocket.send(JSON.stringify({
             type: 'audio',
-            data: message.delta
+            data: message.delta,
+            format: 'pcm16'
           }));
         }
         
-        // Transcriptions
+        // Transcriptions - Note these will be in English due to language setting
         if (message.type === 'conversation.item.input_audio_transcription.completed') {
-          console.log(`📝 [${clientId}] User: ${message.transcript}`);
+          console.log(`📝 [${clientId}] User (English): ${message.transcript}`);
           clientSocket.send(JSON.stringify({
             type: 'transcript',
             role: 'user',
-            text: message.transcript
+            text: message.transcript,
+            language: 'en'
           }));
         }
         
         if (message.type === 'response.audio_transcript.done') {
-          console.log(`🤖 [${clientId}] AI: ${message.transcript}`);
+          console.log(`🤖 [${clientId}] AI (English): ${message.transcript}`);
           clientSocket.send(JSON.stringify({
             type: 'transcript',
             role: 'assistant',
-            text: message.transcript
+            text: message.transcript,
+            language: 'en'
           }));
         }
         
@@ -231,7 +236,7 @@ wss.on('connection', async (clientSocket, req) => {
     });
     
     openaiWs.on('close', () => {
-      console.log(`🔴 [${clientId}] OpenAI closed`);
+      console.log(`🔴 [${clientId}] OpenAI connection closed`);
       isReady = false;
       clientSocket.close();
     });
@@ -267,9 +272,9 @@ wss.on('connection', async (clientSocket, req) => {
       return;
     }
     
-    // Text messages with optional files
+    // Text messages with optional files - Response will be in English
     if (message.type === 'text_message' && message.text) {
-      console.log(`💬 [${clientId}] Text: ${message.text.substring(0, 50)}...`);
+      console.log(`💬 [${clientId}] Text (English): ${message.text.substring(0, 50)}...`);
       
       // Clear audio buffer first
       openaiWs.send(JSON.stringify({ type: 'input_audio_buffer.clear' }));
@@ -281,11 +286,11 @@ wss.on('connection', async (clientSocket, req) => {
         console.log(`📎 [${clientId}] With ${message.files.length} files`);
         for (const file of message.files) {
           if (file.type && file.type.startsWith('image/')) {
-            fullText += `\n\n[Image: ${file.name}. URL: ${file.url}. Please analyze.]`;
+            fullText += `\n\n[Image: ${file.name}. URL: ${file.url}. Please analyze in English.]`;
           } else if (file.content) {
-            fullText += `\n\n[Document: ${file.name}]\n${file.content}`;
+            fullText += `\n\n[Document: ${file.name}]\n${file.content}\n\nPlease respond in English.`;
           } else if (file.text) {
-            fullText += `\n\n[File: ${file.name}]\n${file.text}`;
+            fullText += `\n\n[File: ${file.name}]\n${file.text}\n\nPlease respond in English.`;
           }
         }
       }
@@ -302,14 +307,20 @@ wss.on('connection', async (clientSocket, req) => {
       
       // Trigger response
       setTimeout(() => {
-        openaiWs.send(JSON.stringify({ type: 'response.create' }));
+        openaiWs.send(JSON.stringify({ 
+          type: 'response.create',
+          response: {
+            modalities: ['text', 'audio']
+          }
+        }));
       }, 50);
       
       // Echo to client
       clientSocket.send(JSON.stringify({
         type: 'transcript',
         role: 'user',
-        text: message.text
+        text: message.text,
+        language: 'en'
       }));
       
       return;
@@ -323,13 +334,13 @@ wss.on('connection', async (clientSocket, req) => {
       
       let text = '';
       if (message.mimeType && message.mimeType.startsWith('image/')) {
-        text = `[Image: ${message.filename}. URL: ${message.url}. Please analyze.]`;
+        text = `[Image: ${message.filename}. URL: ${message.url}. Please analyze in English.]`;
       } else if (message.content) {
-        text = `[Document: ${message.filename}]\n${message.content}`;
+        text = `[Document: ${message.filename}]\n${message.content}\n\nPlease respond in English.`;
       } else if (message.text) {
-        text = `[File: ${message.filename}]\n${message.text}`;
+        text = `[File: ${message.filename}]\n${message.text}\n\nPlease respond in English.`;
       } else {
-        text = `[File: ${message.filename}. URL: ${message.url}]`;
+        text = `[File: ${message.filename}. URL: ${message.url}]. Please describe in English.`;
       }
       
       openaiWs.send(JSON.stringify({
@@ -342,12 +353,18 @@ wss.on('connection', async (clientSocket, req) => {
       }));
       
       setTimeout(() => {
-        openaiWs.send(JSON.stringify({ type: 'response.create' }));
+        openaiWs.send(JSON.stringify({ 
+          type: 'response.create',
+          response: {
+            modalities: ['text', 'audio']
+          }
+        }));
       }, 50);
       
       clientSocket.send(JSON.stringify({
         type: 'attachment_received',
-        filename: message.filename
+        filename: message.filename,
+        language: 'en'
       }));
       
       return;
@@ -358,6 +375,16 @@ wss.on('connection', async (clientSocket, req) => {
       openaiWs.send(JSON.stringify({
         type: 'input_audio_buffer.append',
         audio: message.data
+      }));
+      return;
+    }
+    
+    // Language change request (though default is English)
+    if (message.type === 'set_language' && message.language === 'en') {
+      console.log(`🌐 [${clientId}] Language already set to English`);
+      clientSocket.send(JSON.stringify({
+        type: 'language_set',
+        language: 'en'
       }));
       return;
     }
@@ -395,7 +422,9 @@ wss.on('connection', async (clientSocket, req) => {
 server.listen(PORT, '0.0.0.0', () => {
   console.log(`\n✅ Server running on port ${PORT}`);
   console.log(`🔗 WebSocket ready at ws://localhost:${PORT}`);
-  console.log('\n🎤 Ready for voice conversations...\n');
+  console.log(`🌐 Default language: English (en)`);
+  console.log(`🎙️  Voice: alloy`);
+  console.log('\n🎤 Ready for voice conversations in English...\n');
 });
 
 // Graceful shutdown
