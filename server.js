@@ -1,4 +1,3 @@
-// server.js - Working Realtime API Server
 const http = require('http');
 const WebSocket = require('ws');
 const https = require('https');
@@ -188,6 +187,7 @@ wss.on('connection', async (clientSocket, req) => {
   console.log(`\n📞 [${clientId}] New connection from ${req.socket.remoteAddress}`);
   
   let openaiWs = null;
+  let isMuted = false;
   
   try {
     // Get ephemeral token
@@ -338,13 +338,11 @@ wss.on('connection', async (clientSocket, req) => {
   } catch (error) {
     console.error(`❌ [${clientId}] Setup failed:`, error.message);
     
-    // Try alternative approach if Realtime API fails
     clientSocket.send(JSON.stringify({
       type: 'error',
       message: `Realtime setup failed: ${error.message}. Using fallback mode.`
     }));
     
-    // Fallback to using Chat + TTS
     setupFallback(clientSocket, clientId);
     return;
   }
@@ -354,8 +352,125 @@ wss.on('connection', async (clientSocket, req) => {
     try {
       const message = JSON.parse(data.toString());
       
-      // Forward audio to OpenAI
-      if (message.type === 'audio' && message.data && openaiWs) {
+      // Handle mute/unmute
+      if (message.type === 'mute') {
+        isMuted = true;
+        console.log(`🔇 [${clientId}] Muted`);
+        clientSocket.send(JSON.stringify({
+          type: 'muted',
+          muted: true
+        }));
+        return;
+      }
+      
+      if (message.type === 'unmute') {
+        isMuted = false;
+        console.log(`🔊 [${clientId}] Unmuted`);
+        clientSocket.send(JSON.stringify({
+          type: 'muted',
+          muted: false
+        }));
+        return;
+      }
+      
+      // Handle text messages
+      if (message.type === 'text_message' && message.text && openaiWs) {
+        console.log(`💬 [${clientId}] Text message: ${message.text}`);
+        
+        let fullText = message.text;
+        
+        // Append file context if provided
+        if (message.files && message.files.length > 0) {
+          for (const file of message.files) {
+            if (file.type.startsWith('image/')) {
+              fullText += `\n\n[Image attached: ${file.name}. URL: ${file.url}]`;
+            } else if (file.content) {
+              fullText += `\n\n[Document: ${file.name}]\n${file.content}`;
+            }
+          }
+        }
+        
+        // Create conversation item
+        openaiWs.send(JSON.stringify({
+          type: 'conversation.item.create',
+          item: {
+            type: 'message',
+            role: 'user',
+            content: [{
+              type: 'input_text',
+              text: fullText
+            }]
+          }
+        }));
+        
+        // Commit and trigger response
+        openaiWs.send(JSON.stringify({
+          type: 'input_audio_buffer.commit'
+        }));
+        
+        openaiWs.send(JSON.stringify({
+          type: 'response.create',
+          response: {
+            modalities: ['text', 'audio']
+          }
+        }));
+        
+        // Echo to client
+        clientSocket.send(JSON.stringify({
+          type: 'transcript',
+          role: 'user',
+          text: message.text
+        }));
+      }
+      
+      // Handle attachments
+      if (message.type === 'attachment' && openaiWs) {
+        console.log(`📎 [${clientId}] Attachment: ${message.filename}`);
+        
+        let attachmentText = '';
+        
+        if (message.mimeType && message.mimeType.startsWith('image/')) {
+          attachmentText = `[User attached image: ${message.filename}. URL: ${message.url}. Please analyze this image.]`;
+        } else if (message.content) {
+          attachmentText = `[User attached document: ${message.filename}]\nContent:\n${message.content}`;
+        } else {
+          attachmentText = `[User attached file: ${message.filename} (${message.mimeType}). URL: ${message.url}]`;
+        }
+        
+        // Send as conversation item
+        openaiWs.send(JSON.stringify({
+          type: 'conversation.item.create',
+          item: {
+            type: 'message',
+            role: 'user',
+            content: [{
+              type: 'input_text',
+              text: attachmentText
+            }]
+          }
+        }));
+        
+        // Commit and trigger response
+        openaiWs.send(JSON.stringify({
+          type: 'input_audio_buffer.commit'
+        }));
+        
+        openaiWs.send(JSON.stringify({
+          type: 'response.create',
+          response: {
+            modalities: ['text', 'audio']
+          }
+        }));
+        
+        // Confirm to client
+        clientSocket.send(JSON.stringify({
+          type: 'attachment_received',
+          filename: message.filename
+        }));
+      }
+      
+      // Forward audio to OpenAI (only if not muted)
+      if (message.type === 'audio' && message.data && openaiWs && !isMuted) {
         openaiWs.send(JSON.stringify({
           type: 'input_audio_buffer.append',
           audio: message.data
@@ -395,7 +510,6 @@ function setupFallback(clientSocket, clientId) {
     message: 'Using fallback mode (near real-time)'
   }));
   
-  // Send greeting
   setTimeout(() => {
     clientSocket.send(JSON.stringify({
       type: 'transcript',
@@ -411,17 +525,13 @@ function setupFallback(clientSocket, clientId) {
       const message = JSON.parse(data.toString());
       
       if (message.type === 'audio' && message.data) {
-        // Buffer audio
         audioBuffer += message.data;
         
-        // When buffer has enough data, process it
         if (audioBuffer.length > 5000) {
           isProcessing = true;
           
-          // Simulate transcription
           const transcript = "Hello there! How can I assist you today?";
           
-          // Get AI response
           const response = await fetch('https://api.openai.com/v1/chat/completions', {
             method: 'POST',
             headers: {
@@ -441,7 +551,6 @@ function setupFallback(clientSocket, clientId) {
           const json = await response.json();
           const aiText = json.choices[0].message.content;
           
-          // Convert to speech
           const ttsResponse = await fetch('https://api.openai.com/v1/audio/speech', {
             method: 'POST',
             headers: {
@@ -459,14 +568,12 @@ function setupFallback(clientSocket, clientId) {
           const audioData = await ttsResponse.arrayBuffer();
           const base64Audio = Buffer.from(audioData).toString('base64');
           
-          // Send to client
           clientSocket.send(JSON.stringify({
             type: 'audio',
             format: 'mp3',
             data: base64Audio
           }));
           
-          // Reset
           audioBuffer = '';
           isProcessing = false;
         }
@@ -486,7 +593,6 @@ server.listen(PORT, '0.0.0.0', async () => {
   console.log(`📊 Test endpoint: http://localhost:${PORT}/test`);
   console.log('\n🎤 Ready for real-time voice conversations...');
   
-  // Test the API key on startup
   try {
     await testAPIKey();
   } catch (error) {
