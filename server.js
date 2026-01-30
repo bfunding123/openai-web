@@ -188,6 +188,9 @@ wss.on('connection', async (clientSocket, req) => {
   
   let openaiWs = null;
   let isMuted = false;
+  let isOpenAIReady = false;
+  let pendingMessages = [];
+  let pendingAudio = [];
   
   try {
     // Get ephemeral token
@@ -254,6 +257,28 @@ wss.on('connection', async (clientSocket, req) => {
         if (message.type === 'session.updated') {
           if (message.session?.status === 'ready') {
             console.log(`✅ [${clientId}] Session ready - Listening...`);
+            isOpenAIReady = true;
+            
+            // Process any pending messages
+            if (pendingMessages.length > 0) {
+              console.log(`⏳ [${clientId}] Processing ${pendingMessages.length} pending messages`);
+              for (const msg of pendingMessages) {
+                processClientMessage(msg);
+              }
+              pendingMessages = [];
+            }
+            
+            // Process any pending audio
+            if (pendingAudio.length > 0 && !isMuted) {
+              console.log(`⏳ [${clientId}] Processing ${pendingAudio.length} pending audio chunks`);
+              for (const audioChunk of pendingAudio) {
+                openaiWs.send(JSON.stringify({
+                  type: 'input_audio_buffer.append',
+                  audio: audioChunk
+                }));
+              }
+              pendingAudio = [];
+            }
             
             // Send initial greeting
             setTimeout(() => {
@@ -315,6 +340,14 @@ wss.on('connection', async (clientSocket, req) => {
             type: 'error',
             message: message.error?.message
           }));
+          
+          // If it's a buffer commit error, we might need to clear the buffer
+          if (message.error?.code === 'input_audio_buffer_commit_empty') {
+            console.log(`🔄 [${clientId}] Clearing audio buffer due to commit error`);
+            openaiWs.send(JSON.stringify({
+              type: 'input_audio_buffer.clear'
+            }));
+          }
         }
         
       } catch (error) {
@@ -332,6 +365,7 @@ wss.on('connection', async (clientSocket, req) => {
     
     openaiWs.on('close', () => {
       console.log(`🔴 [${clientId}] OpenAI connection closed`);
+      isOpenAIReady = false;
       clientSocket.close();
     });
     
@@ -347,11 +381,9 @@ wss.on('connection', async (clientSocket, req) => {
     return;
   }
   
-  // Handle client messages
-  clientSocket.on('message', (data) => {
+  // Process client message (separated for better handling)
+  const processClientMessage = (message) => {
     try {
-      const message = JSON.parse(data.toString());
-      
       // Handle mute/unmute
       if (message.type === 'mute') {
         isMuted = true;
@@ -377,15 +409,23 @@ wss.on('connection', async (clientSocket, req) => {
       if (message.type === 'text_message' && message.text && openaiWs) {
         console.log(`💬 [${clientId}] Text message: ${message.text}`);
         
+        // Clear any existing audio buffer first to prevent commit errors
+        openaiWs.send(JSON.stringify({
+          type: 'input_audio_buffer.clear'
+        }));
+        
         let fullText = message.text;
         
         // Append file context if provided
         if (message.files && message.files.length > 0) {
+          console.log(`📎 [${clientId}] Processing ${message.files.length} files with text message`);
           for (const file of message.files) {
-            if (file.type.startsWith('image/')) {
-              fullText += `\n\n[Image attached: ${file.name}. URL: ${file.url}]`;
+            if (file.type && file.type.startsWith('image/')) {
+              fullText += `\n\n[Image attached: ${file.name}. URL: ${file.url}. Please analyze this image.]`;
             } else if (file.content) {
               fullText += `\n\n[Document: ${file.name}]\n${file.content}`;
+            } else if (file.text) {
+              fullText += `\n\n[File: ${file.name}]\n${file.text}`;
             }
           }
         }
@@ -403,17 +443,19 @@ wss.on('connection', async (clientSocket, req) => {
           }
         }));
         
-        // Commit and trigger response
-        openaiWs.send(JSON.stringify({
-          type: 'input_audio_buffer.commit'
-        }));
-        
-        openaiWs.send(JSON.stringify({
-          type: 'response.create',
-          response: {
-            modalities: ['text', 'audio']
-          }
-        }));
+        // Clear buffer before committing to avoid "buffer too small" error
+        setTimeout(() => {
+          openaiWs.send(JSON.stringify({
+            type: 'input_audio_buffer.commit'
+          }));
+          
+          openaiWs.send(JSON.stringify({
+            type: 'response.create',
+            response: {
+              modalities: ['text', 'audio']
+            }
+          }));
+        }, 100);
         
         // Echo to client
         clientSocket.send(JSON.stringify({
@@ -423,9 +465,14 @@ wss.on('connection', async (clientSocket, req) => {
         }));
       }
       
-      // Handle attachments
+      // Handle standalone attachments (without text)
       if (message.type === 'attachment' && openaiWs) {
         console.log(`📎 [${clientId}] Attachment: ${message.filename}`);
+        
+        // Clear any existing audio buffer first
+        openaiWs.send(JSON.stringify({
+          type: 'input_audio_buffer.clear'
+        }));
         
         let attachmentText = '';
         
@@ -433,8 +480,10 @@ wss.on('connection', async (clientSocket, req) => {
           attachmentText = `[User attached image: ${message.filename}. URL: ${message.url}. Please analyze this image.]`;
         } else if (message.content) {
           attachmentText = `[User attached document: ${message.filename}]\nContent:\n${message.content}`;
+        } else if (message.text) {
+          attachmentText = `[User attached file: ${message.filename}]\nContent:\n${message.text}`;
         } else {
-          attachmentText = `[User attached file: ${message.filename} (${message.mimeType}). URL: ${message.url}]`;
+          attachmentText = `[User attached file: ${message.filename} (${message.mimeType || 'unknown type'}). URL: ${message.url}]`;
         }
         
         // Send as conversation item
@@ -450,17 +499,19 @@ wss.on('connection', async (clientSocket, req) => {
           }
         }));
         
-        // Commit and trigger response
-        openaiWs.send(JSON.stringify({
-          type: 'input_audio_buffer.commit'
-        }));
-        
-        openaiWs.send(JSON.stringify({
-          type: 'response.create',
-          response: {
-            modalities: ['text', 'audio']
-          }
-        }));
+        // Clear buffer before committing
+        setTimeout(() => {
+          openaiWs.send(JSON.stringify({
+            type: 'input_audio_buffer.commit'
+          }));
+          
+          openaiWs.send(JSON.stringify({
+            type: 'response.create',
+            response: {
+              modalities: ['text', 'audio']
+            }
+          }));
+        }, 100);
         
         // Confirm to client
         clientSocket.send(JSON.stringify({
@@ -469,12 +520,75 @@ wss.on('connection', async (clientSocket, req) => {
         }));
       }
       
+      // Handle file uploads with multiple files
+      if (message.type === 'file_upload' && openaiWs) {
+        console.log(`📂 [${clientId}] File upload with ${message.files?.length || 0} files`);
+        
+        if (message.files && message.files.length > 0) {
+          // Clear any existing audio buffer first
+          openaiWs.send(JSON.stringify({
+            type: 'input_audio_buffer.clear'
+          }));
+          
+          let combinedText = '';
+          
+          for (const file of message.files) {
+            if (file.type && file.type.startsWith('image/')) {
+              combinedText += `\n\n[Image: ${file.name}]\nURL: ${file.url}\nPlease analyze this image.`;
+            } else if (file.text || file.content) {
+              const content = file.text || file.content;
+              combinedText += `\n\n[${file.name}]\n${content}`;
+            } else {
+              combinedText += `\n\n[File: ${file.name}]`;
+            }
+          }
+          
+          // Send as conversation item
+          openaiWs.send(JSON.stringify({
+            type: 'conversation.item.create',
+            item: {
+              type: 'message',
+              role: 'user',
+              content: [{
+                type: 'input_text',
+                text: `I'm sharing these files with you:${combinedText}\n\nPlease review the files and let me know what you think.`
+              }]
+            }
+          }));
+          
+          // Clear buffer before committing
+          setTimeout(() => {
+            openaiWs.send(JSON.stringify({
+              type: 'input_audio_buffer.commit'
+            }));
+            
+            openaiWs.send(JSON.stringify({
+              type: 'response.create',
+              response: {
+                modalities: ['text', 'audio']
+              }
+            }));
+          }, 100);
+          
+          // Confirm to client
+          clientSocket.send(JSON.stringify({
+            type: 'files_received',
+            count: message.files.length
+          }));
+        }
+      }
+      
       // Forward audio to OpenAI (only if not muted)
       if (message.type === 'audio' && message.data && openaiWs && !isMuted) {
-        openaiWs.send(JSON.stringify({
-          type: 'input_audio_buffer.append',
-          audio: message.data
-        }));
+        if (isOpenAIReady) {
+          openaiWs.send(JSON.stringify({
+            type: 'input_audio_buffer.append',
+            audio: message.data
+          }));
+        } else {
+          // Buffer audio until OpenAI is ready
+          pendingAudio.push(message.data);
+        }
       }
       
       if (message.type === 'start') {
@@ -483,6 +597,37 @@ wss.on('connection', async (clientSocket, req) => {
       
     } catch (error) {
       console.error(`❌ [${clientId}] Client message error:`, error);
+      clientSocket.send(JSON.stringify({
+        type: 'error',
+        message: `Failed to process message: ${error.message}`
+      }));
+    }
+  };
+  
+  // Handle client messages
+  clientSocket.on('message', (data) => {
+    try {
+      const message = JSON.parse(data.toString());
+      
+      // Check if OpenAI WebSocket is ready
+      if (openaiWs && openaiWs.readyState === WebSocket.OPEN) {
+        if (isOpenAIReady) {
+          processClientMessage(message);
+        } else {
+          // Queue message until OpenAI is ready
+          pendingMessages.push(message);
+          console.log(`⏳ [${clientId}] Queuing message, OpenAI not ready yet`);
+        }
+      } else {
+        console.error(`❌ [${clientId}] OpenAI WebSocket not open, state: ${openaiWs?.readyState}`);
+        clientSocket.send(JSON.stringify({
+          type: 'error',
+          message: 'Connection not ready. Please try again.'
+        }));
+      }
+      
+    } catch (error) {
+      console.error(`❌ [${clientId}] Parse error:`, error);
     }
   });
   
@@ -523,6 +668,78 @@ function setupFallback(clientSocket, clientId) {
     
     try {
       const message = JSON.parse(data.toString());
+      
+      // Handle mute/unmute in fallback mode
+      if (message.type === 'mute') {
+        clientSocket.send(JSON.stringify({
+          type: 'muted',
+          muted: true
+        }));
+        return;
+      }
+      
+      if (message.type === 'unmute') {
+        clientSocket.send(JSON.stringify({
+          type: 'muted',
+          muted: false
+        }));
+        return;
+      }
+      
+      // Handle text messages in fallback mode
+      if (message.type === 'text_message' && message.text) {
+        console.log(`💬 [${clientId}] Fallback text: ${message.text}`);
+        
+        const response = await fetch('https://api.openai.com/v1/chat/completions', {
+          method: 'POST',
+          headers: {
+            'Authorization': `Bearer ${OPENAI_API_KEY}`,
+            'Content-Type': 'application/json'
+          },
+          body: JSON.stringify({
+            model: 'gpt-4',
+            messages: [
+              { role: 'system', content: 'Be conversational and helpful.' },
+              { role: 'user', content: message.text }
+            ],
+            max_tokens: 150
+          })
+        });
+        
+        const json = await response.json();
+        const aiText = json.choices[0].message.content;
+        
+        // Send text response
+        clientSocket.send(JSON.stringify({
+          type: 'transcript',
+          role: 'assistant',
+          text: aiText
+        }));
+        
+        // Generate and send audio
+        const ttsResponse = await fetch('https://api.openai.com/v1/audio/speech', {
+          method: 'POST',
+          headers: {
+            'Authorization': `Bearer ${OPENAI_API_KEY}`,
+            'Content-Type': 'application/json'
+          },
+          body: JSON.stringify({
+            model: 'tts-1',
+            input: aiText,
+            voice: 'alloy',
+            response_format: 'mp3'
+          })
+        });
+        
+        const audioData = await ttsResponse.arrayBuffer();
+        const base64Audio = Buffer.from(audioData).toString('base64');
+        
+        clientSocket.send(JSON.stringify({
+          type: 'audio',
+          format: 'mp3',
+          data: base64Audio
+        }));
+      }
       
       if (message.type === 'audio' && message.data) {
         audioBuffer += message.data;
