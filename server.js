@@ -198,9 +198,10 @@ wss.on('connection', async (clientSocket, req) => {
       try {
         const message = JSON.parse(data.toString());
         
-        // LOG ALL MESSAGE TYPES FOR DEBUGGING
+        // LOG EVERY SINGLE MESSAGE FOR DEBUGGING
         if (!['response.audio.delta'].includes(message.type)) {
-          console.log(`🔵 [${clientId}] OpenAI message type: ${message.type}`, message.type === 'error' ? message : '');
+          console.log(`🔵 [${clientId}] OpenAI message type: ${message.type}`);
+          console.log(`📋 [${clientId}] Full message:`, JSON.stringify(message, null, 2));
         }
         
         // Session ready - process queue
@@ -279,10 +280,16 @@ wss.on('connection', async (clientSocket, req) => {
         
         // Transcription failures
         if (message.type === 'conversation.item.input_audio_transcription.failed') {
-          console.error(`❌ [${clientId}] Transcription FAILED:`, JSON.stringify(message, null, 2));
+          console.error(`❌❌❌ [${clientId}] TRANSCRIPTION FAILED ❌❌❌`);
+          console.error(`Full error object:`, JSON.stringify(message, null, 2));
+          console.error(`Error details:`, {
+            item_id: message.item_id,
+            content_index: message.content_index,
+            error: message.error
+          });
           clientSocket.send(JSON.stringify({
             type: 'error',
-            message: 'Audio transcription failed - please try again'
+            message: `Transcription failed: ${message.error?.message || 'Unknown error'}`
           }));
         }
         
