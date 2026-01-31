@@ -158,7 +158,7 @@ wss.on('connection', async (clientSocket, req) => {
     openaiWs.on('open', () => {
       console.log(`✅ [${clientId}] Connected to OpenAI`);
       
-      // Configure session
+      // Configure session with LONGER silence timeout for phone calls
       openaiWs.send(JSON.stringify({
         type: 'session.update',
         session: {
@@ -263,7 +263,7 @@ wss.on('connection', async (clientSocket, req) => {
         
         // Transcriptions
         if (message.type === 'conversation.item.input_audio_transcription.completed') {
-          console.log(`📝 [${clientId}] User said: ${message.transcript}`);
+          console.log(`📝 [${clientId}] User said: "${message.transcript}"`);
           clientSocket.send(JSON.stringify({
             type: 'transcript',
             role: 'user',
@@ -273,13 +273,17 @@ wss.on('connection', async (clientSocket, req) => {
         }
         
         if (message.type === 'response.audio_transcript.done') {
-          console.log(`🤖 [${clientId}] AI said: ${message.transcript}`);
+          console.log(`🤖 [${clientId}] AI said: "${message.transcript}"`);
           clientSocket.send(JSON.stringify({
             type: 'transcript',
             role: 'assistant',
             text: message.transcript,
             language: 'en'
           }));
+        }
+        
+        if (message.type === 'response.audio_transcript.delta') {
+          console.log(`🗣️ [${clientId}] AI speaking chunk: "${message.delta}"`);
         }
         
         // Errors
