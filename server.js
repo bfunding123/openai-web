@@ -158,12 +158,14 @@ wss.on('connection', async (clientSocket, req) => {
     openaiWs.on('open', () => {
       console.log(`✅ [${clientId}] Connected to OpenAI`);
       
-      // Configure session with LONGER silence timeout for phone calls
+      // Configure session
       openaiWs.send(JSON.stringify({
         type: 'session.update',
         session: {
           modalities: ['text', 'audio'],
-          instructions: 'You are Life, a friendly AI voice assistant. Keep responses concise and conversational. You cannot access external links or files - if mentioned, ask the user to describe the content.',
+          instructions: `You are a helpful, friendly AI assistant. Always respond in English. 
+          IMPORTANT: You cannot access external links, files, or URLs. If a user shares a file or link, 
+          ask them to describe or summarize the content for you. Keep responses concise and natural.`,
           voice: 'alloy',
           input_audio_format: 'pcm16',
           output_audio_format: 'pcm16',
@@ -173,9 +175,9 @@ wss.on('connection', async (clientSocket, req) => {
           },
           turn_detection: {
             type: 'server_vad',
-            threshold: 0.5,
+            threshold: 0.6,
             prefix_padding_ms: 300,
-            silence_duration_ms: 1200
+            silence_duration_ms: 800
           },
           temperature: 0.8,
           tools: []
@@ -198,15 +200,9 @@ wss.on('connection', async (clientSocket, req) => {
       try {
         const message = JSON.parse(data.toString());
         
-        // LOG EVERY SINGLE MESSAGE FOR DEBUGGING
-        if (!['response.audio.delta'].includes(message.type)) {
-          console.log(`🔵 [${clientId}] OpenAI message type: ${message.type}`);
-          console.log(`📋 [${clientId}] Full message:`, JSON.stringify(message, null, 2));
-        }
-        
         // Session ready - process queue
         if (message.type === 'session.updated') {
-          console.log(`✅ [${clientId}] Session ready - VAD configured with 5s silence timeout`);
+          console.log(`✅ [${clientId}] Session ready (English language mode)`);
           isReady = true;
           
           // Process queued messages
@@ -216,13 +212,14 @@ wss.on('connection', async (clientSocket, req) => {
             handleClientMessage(queuedMsg);
           }
           
-          // Send greeting
+          // Send English greeting
           setTimeout(() => {
             if (openaiWs.readyState === WebSocket.OPEN) {
               openaiWs.send(JSON.stringify({
                 type: 'response.create',
                 response: {
-                  modalities: ['text', 'audio']
+                  modalities: ['text', 'audio'],
+                  instructions: 'Greet the user in English. Welcome them to the conversation. Keep it brief.'
                 }
               }));
             }
@@ -258,7 +255,7 @@ wss.on('connection', async (clientSocket, req) => {
         // Response done
         if (message.type === 'response.done') {
           isResponding = false;
-          console.log(`⏹️ [${clientId}] Response completed - waiting for user...`);
+          console.log(`⏹️ [${clientId}] Response completed`);
         }
         
         // Response cancelled
@@ -269,7 +266,7 @@ wss.on('connection', async (clientSocket, req) => {
         
         // Transcriptions
         if (message.type === 'conversation.item.input_audio_transcription.completed') {
-          console.log(`📝 [${clientId}] User said: "${message.transcript}"`);
+          console.log(`📝 [${clientId}] User (English): ${message.transcript}`);
           clientSocket.send(JSON.stringify({
             type: 'transcript',
             role: 'user',
@@ -278,33 +275,14 @@ wss.on('connection', async (clientSocket, req) => {
           }));
         }
         
-        // Transcription failures
-        if (message.type === 'conversation.item.input_audio_transcription.failed') {
-          console.error(`❌❌❌ [${clientId}] TRANSCRIPTION FAILED ❌❌❌`);
-          console.error(`Full error object:`, JSON.stringify(message, null, 2));
-          console.error(`Error details:`, {
-            item_id: message.item_id,
-            content_index: message.content_index,
-            error: message.error
-          });
-          clientSocket.send(JSON.stringify({
-            type: 'error',
-            message: `Transcription failed: ${message.error?.message || 'Unknown error'}`
-          }));
-        }
-        
         if (message.type === 'response.audio_transcript.done') {
-          console.log(`🤖 [${clientId}] AI said: "${message.transcript}"`);
+          console.log(`🤖 [${clientId}] AI (English): ${message.transcript}`);
           clientSocket.send(JSON.stringify({
             type: 'transcript',
             role: 'assistant',
             text: message.transcript,
             language: 'en'
           }));
-        }
-        
-        if (message.type === 'response.audio_transcript.delta') {
-          console.log(`🗣️ [${clientId}] AI speaking chunk: "${message.delta}"`);
         }
         
         // Errors
@@ -366,8 +344,7 @@ wss.on('connection', async (clientSocket, req) => {
     
     // Text messages with optional text content from files
     if (message.type === 'text_message' && message.text) {
-      console.log(`💬 [${clientId}] Text: ${message.text.substring(0, 100)}...`);
-      console.log(`📊 [${clientId}] isResponding=${isResponding}, isReady=${isReady}, wsState=${openaiWs.readyState}`);
+      console.log(`💬 [${clientId}] Text (English): ${message.text.substring(0, 100)}...`);
       
       // Don't send if already responding
       if (isResponding) {
@@ -380,7 +357,6 @@ wss.on('connection', async (clientSocket, req) => {
       }
       
       // Clear audio buffer first
-      console.log(`🧹 [${clientId}] Clearing audio buffer...`);
       openaiWs.send(JSON.stringify({ type: 'input_audio_buffer.clear' }));
       
       // Start building the message text
@@ -397,6 +373,7 @@ wss.on('connection', async (clientSocket, req) => {
             fullText += `\n\n[Content from ${fileName}]:\n${fileText}`;
             console.log(`📝 [${clientId}] Added text from: ${fileName} (${fileText.length} chars)`);
           } else if (file.url) {
+            // If only URL is provided, ask user to describe
             fullText += `\n\n[Note: I cannot access the file at ${file.url}. Please describe what's in the file.]`;
             console.log(`🔗 [${clientId}] URL file referenced: ${file.name || file.url}`);
           }
@@ -404,7 +381,6 @@ wss.on('connection', async (clientSocket, req) => {
       }
       
       // Create conversation item with text content only
-      console.log(`📝 [${clientId}] Creating conversation item with text: "${fullText.substring(0, 50)}..."`);
       openaiWs.send(JSON.stringify({
         type: 'conversation.item.create',
         item: {
@@ -416,18 +392,13 @@ wss.on('connection', async (clientSocket, req) => {
       
       // Wait a bit before triggering response
       setTimeout(() => {
-        console.log(`⏰ [${clientId}] Timeout fired - wsState=${openaiWs.readyState}, isResponding=${isResponding}`);
         if (openaiWs.readyState === WebSocket.OPEN && !isResponding) {
-          console.log(`🚀 [${clientId}] Sending response.create to OpenAI...`);
           openaiWs.send(JSON.stringify({ 
             type: 'response.create',
             response: {
               modalities: ['text', 'audio']
             }
           }));
-          console.log(`✅ [${clientId}] response.create sent`);
-        } else {
-          console.log(`❌ [${clientId}] Cannot send response.create - wsState=${openaiWs.readyState}, isResponding=${isResponding}`);
         }
       }, 200);
       
@@ -480,20 +451,11 @@ wss.on('connection', async (clientSocket, req) => {
     
     // Audio streaming (only if not muted)
     if (message.type === 'audio' && message.data && !isMuted) {
-      console.log(`🎤 [${clientId}] Sending audio to OpenAI: ${message.data.length} bytes, muted=${isMuted}`);
       openaiWs.send(JSON.stringify({
         type: 'input_audio_buffer.append',
         audio: message.data
       }));
       return;
-    }
-    
-    // Log if audio was skipped
-    if (message.type === 'audio' && !message.data) {
-      console.log(`⚠️ [${clientId}] Audio message received but no data`);
-    }
-    if (message.type === 'audio' && isMuted) {
-      console.log(`🔇 [${clientId}] Audio skipped - muted`);
     }
     
     // Cancel current response
@@ -549,10 +511,8 @@ wss.on('connection', async (clientSocket, req) => {
   clientSocket.on('message', (data) => {
     try {
       const message = JSON.parse(data.toString());
-      console.log(`📥 [${clientId}] Received message type: ${message.type}, isReady: ${isReady}`);
       
       if (isReady) {
-        console.log(`✅ [${clientId}] Session ready - handling message directly`);
         handleClientMessage(message);
       } else {
         // Queue until ready (except audio which we can buffer)
@@ -561,7 +521,7 @@ wss.on('connection', async (clientSocket, req) => {
           console.log(`🎤 [${clientId}] Buffering audio (not ready yet)`);
         } else {
           messageQueue.push(message);
-          console.log(`⏳ [${clientId}] Queued: ${message.type} (queue size: ${messageQueue.length})`);
+          console.log(`⏳ [${clientId}] Queued: ${message.type}`);
         }
       }
       
