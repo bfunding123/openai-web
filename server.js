@@ -279,16 +279,10 @@ wss.on('connection', async (clientSocket, req) => {
         
         // Transcription failures
         if (message.type === 'conversation.item.input_audio_transcription.failed') {
-          console.error(`❌❌❌ [${clientId}] TRANSCRIPTION FAILED ❌❌❌`);
-          console.error(`Full error object:`, JSON.stringify(message, null, 2));
-          console.error(`Error details:`, {
-            item_id: message.item_id,
-            content_index: message.content_index,
-            error: message.error
-          });
+          console.error(`❌ [${clientId}] Transcription FAILED:`, JSON.stringify(message, null, 2));
           clientSocket.send(JSON.stringify({
             type: 'error',
-            message: `Transcription failed: ${message.error?.message || 'Unknown error'}`
+            message: 'Audio transcription failed - please try again'
           }));
         }
         
