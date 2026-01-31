@@ -216,6 +216,7 @@ wss.on('connection', async (clientSocket, req) => {
   let isReady = false;
   let isResponding = false;
   let messageQueue = [];
+  let currentLanguage = 'en'; // Default to English
   
   try {
     const token = await getRealtimeToken();
@@ -233,14 +234,18 @@ wss.on('connection', async (clientSocket, req) => {
     openaiWs.on('open', () => {
       console.log(`✅ [${clientId}] Connected to OpenAI`);
       
-      // Configure session with CORRECT tool configuration
+      // Configure session with DEFAULT LANGUAGE SET TO ENGLISH
       openaiWs.send(JSON.stringify({
         type: 'session.update',
         session: {
           modalities: ['text', 'audio'],
-          instructions: `You are Life, a friendly AI voice assistant. You can search the web for real-time information using the web_search tool.
+          instructions: `You are Life, a friendly AI voice assistant. 
           
-          IMPORTANT: When users ask about:
+          IMPORTANT: You must ALWAYS speak in English by default. Only switch to other languages if explicitly requested by the user.
+          
+          You can search the web for real-time information using the web_search tool.
+          
+          When users ask about:
           - Weather (current weather, temperature, forecast)
           - News (current events, breaking news)
           - Sports (scores, schedules, results)
@@ -259,7 +264,7 @@ wss.on('connection', async (clientSocket, req) => {
           output_audio_format: 'pcm16',
           input_audio_transcription: {
             model: 'whisper-1',
-            language: 'en'
+            language: 'en' // FORCE ENGLISH AS DEFAULT
           },
           turn_detection: {
             type: 'server_vad',
@@ -315,7 +320,7 @@ wss.on('connection', async (clientSocket, req) => {
         
         // Session ready - process queue
         if (message.type === 'session.updated') {
-          console.log(`✅ [${clientId}] Session ready with web search capabilities`);
+          console.log(`✅ [${clientId}] Session ready with English as default language`);
           isReady = true;
           
           // Process queued messages
@@ -325,14 +330,15 @@ wss.on('connection', async (clientSocket, req) => {
             handleClientMessage(queuedMsg);
           }
           
-          // Send greeting
+          // Send greeting in English
           setTimeout(() => {
             if (openaiWs.readyState === WebSocket.OPEN) {
-              console.log(`👋 [${clientId}] Sending greeting...`);
+              console.log(`👋 [${clientId}] Sending English greeting...`);
               openaiWs.send(JSON.stringify({
                 type: 'response.create',
                 response: {
-                  modalities: ['text', 'audio']
+                  modalities: ['text', 'audio'],
+                  instructions: 'Greet the user in English. Say "Hello! I am Life, your AI assistant. I can help you with information, answer questions, and search the web for real-time data. What would you like to know today?" Keep it friendly and welcoming.'
                 }
               }));
             }
@@ -378,7 +384,7 @@ wss.on('connection', async (clientSocket, req) => {
             type: 'transcript',
             role: 'user',
             text: message.transcript,
-            language: 'en'
+            language: currentLanguage
           }));
         }
         
@@ -388,7 +394,7 @@ wss.on('connection', async (clientSocket, req) => {
             type: 'transcript',
             role: 'assistant',
             text: message.transcript,
-            language: 'en'
+            language: currentLanguage
           }));
         }
         
@@ -517,9 +523,56 @@ wss.on('connection', async (clientSocket, req) => {
       return;
     }
     
+    // Language change request
+    if (message.type === 'set_language' && message.language) {
+      console.log(`🌐 [${clientId}] Language change requested: ${message.language}`);
+      currentLanguage = message.language;
+      
+      // Update session language
+      openaiWs.send(JSON.stringify({
+        type: 'session.update',
+        session: {
+          input_audio_transcription: {
+            model: 'whisper-1',
+            language: message.language
+          }
+        }
+      }));
+      
+      // Also update instructions to reflect language change
+      openaiWs.send(JSON.stringify({
+        type: 'conversation.item.create',
+        item: {
+          type: 'message',
+          role: 'user',
+          content: [{ type: 'input_text', text: `Please switch to speaking in ${getLanguageName(message.language)}.` }]
+        }
+      }));
+      
+      // Respond in the new language
+      setTimeout(() => {
+        if (openaiWs.readyState === WebSocket.OPEN) {
+          openaiWs.send(JSON.stringify({ 
+            type: 'response.create',
+            response: {
+              modalities: ['text', 'audio'],
+              instructions: `Confirm that you have switched to ${getLanguageName(message.language)} and ask how you can help in that language.`
+            }
+          }));
+        }
+      }, 200);
+      
+      clientSocket.send(JSON.stringify({
+        type: 'language_set',
+        language: message.language,
+        name: getLanguageName(message.language)
+      }));
+      return;
+    }
+    
     // Text messages
     if (message.type === 'text_message' && message.text) {
-      console.log(`💬 [${clientId}] Text: "${message.text.substring(0, 100)}..."`);
+      console.log(`💬 [${clientId}] Text in ${currentLanguage}: "${message.text.substring(0, 100)}..."`);
       
       if (isResponding) {
         console.log(`⏳ [${clientId}] Skipping - response in progress`);
@@ -574,7 +627,7 @@ wss.on('connection', async (clientSocket, req) => {
         type: 'transcript',
         role: 'user',
         text: message.text,
-        language: 'en'
+        language: currentLanguage
       }));
       
       return;
@@ -589,7 +642,7 @@ wss.on('connection', async (clientSocket, req) => {
       return;
     }
     
-    // Other message types...
+    // Cancel current response
     if (message.type === 'cancel') {
       console.log(`⏹️ [${clientId}] Cancelling current response`);
       if (isResponding) {
@@ -600,40 +653,57 @@ wss.on('connection', async (clientSocket, req) => {
       return;
     }
     
-    if (message.type === 'set_language' && message.language) {
-      console.log(`🌐 [${clientId}] Language change: ${message.language}`);
-      openaiWs.send(JSON.stringify({
-        type: 'session.update',
-        session: {
-          input_audio_transcription: {
-            model: 'whisper-1',
-            language: message.language
-          }
-        }
-      }));
-      clientSocket.send(JSON.stringify({
-        type: 'language_set',
-        language: message.language
-      }));
-      return;
-    }
-    
+    // Clear conversation
     if (message.type === 'clear') {
       console.log(`🧹 [${clientId}] Clearing conversation`);
       openaiWs.send(JSON.stringify({
         type: 'conversation.clear'
       }));
+      
+      // Reset language to English after clearing
+      currentLanguage = 'en';
+      openaiWs.send(JSON.stringify({
+        type: 'session.update',
+        session: {
+          input_audio_transcription: {
+            model: 'whisper-1',
+            language: 'en'
+          }
+        }
+      }));
+      
       clientSocket.send(JSON.stringify({
-        type: 'conversation_cleared'
+        type: 'conversation_cleared',
+        language: 'en'
       }));
       return;
     }
+  }
+  
+  // Helper function to get language name from code
+  function getLanguageName(code) {
+    const languages = {
+      'en': 'English',
+      'es': 'Spanish',
+      'fr': 'French',
+      'de': 'German',
+      'it': 'Italian',
+      'pt': 'Portuguese',
+      'ru': 'Russian',
+      'zh': 'Chinese',
+      'ja': 'Japanese',
+      'ko': 'Korean',
+      'hi': 'Hindi',
+      'ar': 'Arabic'
+    };
+    return languages[code] || code;
   }
   
   // Client message handler
   clientSocket.on('message', (data) => {
     try {
       const message = JSON.parse(data.toString());
+      console.log(`📥 [${clientId}] Received ${message.type}, isReady: ${isReady}`);
       
       if (isReady) {
         handleClientMessage(message);
@@ -661,7 +731,7 @@ wss.on('connection', async (clientSocket, req) => {
 server.listen(PORT, '0.0.0.0', () => {
   console.log(`\n✅ Server running on port ${PORT}`);
   console.log(`🔗 WebSocket ready at ws://localhost:${PORT}`);
-  console.log(`🌐 Default language: English (en)`);
+  console.log(`🌐 Default language: English (en) - FORCED`);
   console.log(`🎙️  Voice: alloy`);
   console.log(`🔍 Web search: ENABLED via LLM with internet context`);
   console.log(`📤 File upload endpoint: http://localhost:${PORT}/upload`);
