@@ -67,60 +67,102 @@ async function getRealtimeToken() {
   });
 }
 
-// Function to perform web search using your LLM
+// Function to perform web search - SIMPLIFIED VERSION
 async function performWebSearch(query) {
   try {
     console.log(`🔍 Performing web search for: "${query}"`);
     
-    const searchPrompt = `Find current, accurate, real-time information about: ${query}. 
-    Provide a concise, factual answer. If this is about weather, include temperature, conditions, and forecast.
-    If about news, include recent developments. If about sports, include scores or standings.
-    Be specific with numbers, dates, and sources when possible.`;
+    // Try multiple endpoints or fallbacks
+    const endpoints = [
+      'https://life-ai-360-bz26.onrender.com/api/integrations/Core.InvokeLLM',
+      'https://life-ai-360-bz26.onrender.com/api/chat/completions',
+      'https://life-ai-360-bz26.onrender.com/api/v1/chat'
+    ];
     
-    const response = await fetch('https://life-ai-360-bz26.onrender.com/api/integrations/Core.InvokeLLM', {
-      method: 'POST',
-      headers: { 
-        'Content-Type': 'application/json',
-        'Accept': 'application/json'
-      },
-      body: JSON.stringify({
-        prompt: searchPrompt,
-        add_context_from_internet: true,
-        max_tokens: 500
-      })
-    });
+    let lastError = null;
     
-    if (!response.ok) {
-      throw new Error(`HTTP ${response.status}: ${response.statusText}`);
+    for (const endpoint of endpoints) {
+      try {
+        console.log(`🔗 Trying endpoint: ${endpoint}`);
+        
+        const response = await fetch(endpoint, {
+          method: 'POST',
+          headers: { 
+            'Content-Type': 'application/json',
+            'Accept': 'application/json'
+          },
+          body: JSON.stringify({
+            prompt: `Find current, accurate information about: ${query}. Provide a concise answer with specific details.`,
+            add_context_from_internet: true,
+            max_tokens: 300
+          }),
+          timeout: 5000
+        });
+        
+        console.log(`📊 Response status: ${response.status}`);
+        
+        if (response.ok) {
+          const result = await response.json();
+          console.log(`✅ Search completed via ${endpoint}`);
+          
+          // Extract text from response
+          let searchResult;
+          if (typeof result === 'string') {
+            searchResult = result;
+          } else if (result.response || result.answer || result.content || result.message) {
+            searchResult = result.response || result.answer || result.content || result.message;
+          } else if (result.choices && result.choices[0] && result.choices[0].message) {
+            searchResult = result.choices[0].message.content;
+          } else {
+            searchResult = JSON.stringify(result);
+          }
+          
+          return {
+            success: true,
+            query: query,
+            result: searchResult.substring(0, 1500),
+            timestamp: new Date().toISOString()
+          };
+        } else {
+          console.log(`❌ Endpoint ${endpoint} returned ${response.status}`);
+          lastError = new Error(`HTTP ${response.status}: ${response.statusText}`);
+        }
+      } catch (endpointError) {
+        console.log(`❌ Endpoint ${endpoint} failed:`, endpointError.message);
+        lastError = endpointError;
+      }
     }
     
-    const result = await response.json();
-    console.log(`✅ Search completed, result type:`, typeof result);
+    // If all endpoints fail, provide a fallback response
+    console.log(`❌ All search endpoints failed, using fallback`);
     
-    // Handle different response formats
-    let searchResult;
-    if (typeof result === 'string') {
-      searchResult = result;
-    } else if (result.response || result.answer || result.content) {
-      searchResult = result.response || result.answer || result.content || JSON.stringify(result);
+    // Generate intelligent fallback based on query
+    let fallback = `I searched for "${query}" but couldn't retrieve real-time information. `;
+    
+    if (query.toLowerCase().includes('weather')) {
+      fallback += `For current weather, you can check weather.com, accuweather.com, or your local weather service.`;
+    } else if (query.toLowerCase().includes('news')) {
+      fallback += `For the latest news, check reputable news websites like BBC, CNN, or Reuters.`;
+    } else if (query.toLowerCase().includes('score') || query.toLowerCase().includes('sport')) {
+      fallback += `For sports scores, check ESPN, BBC Sport, or your favorite sports app.`;
     } else {
-      searchResult = JSON.stringify(result);
+      fallback += `You might want to search online directly for the most current information.`;
     }
     
     return {
-      success: true,
+      success: false,
       query: query,
-      result: searchResult.substring(0, 2000), // Limit length
-      timestamp: new Date().toISOString()
+      error: lastError?.message || 'All endpoints failed',
+      fallback: fallback
     };
     
   } catch (error) {
-    console.error('❌ Search error:', error);
+    console.error('❌ Search function error:', error);
     return {
       success: false,
       query: query,
       error: error.message,
-      fallback: `I searched for "${query}" but couldn't retrieve real-time information at the moment. For current weather, you might check weather.com or a weather app. For news, check news websites or apps.`
+      fallback: `Unable to search for "${query}" at the moment. Please try a web search directly.`
     };
   }
 }
@@ -141,62 +183,16 @@ const server = http.createServer(async (req, res) => {
   if (req.url === '/health') {
     res.writeHead(200, { 'Content-Type': 'application/json' });
     res.end(JSON.stringify({ status: 'ok', timestamp: new Date().toISOString() }));
-  } else if (parsedUrl.pathname === '/upload') {
-    // Simple file upload handler that extracts text
-    if (req.method === 'POST') {
-      let body = '';
-      req.on('data', chunk => { body += chunk; });
-      req.on('end', () => {
-        try {
-          const data = JSON.parse(body);
-          const { filename, contentType, text, content } = data;
-          
-          if (!filename) {
-            res.writeHead(400, { 'Content-Type': 'application/json' });
-            res.end(JSON.stringify({ error: 'Missing filename' }));
-            return;
-          }
-          
-          // Extract text from the file
-          const extractedText = text || content || '';
-          const fileId = randomBytes(8).toString('hex');
-          
-          console.log(`📤 File uploaded: ${filename} (${extractedText.length} chars)`);
-          
-          res.writeHead(200, { 'Content-Type': 'application/json' });
-          res.end(JSON.stringify({
-            success: true,
-            filename: filename,
-            text: extractedText,
-            contentType: contentType || 'application/octet-stream',
-            id: fileId,
-            message: 'File content extracted as text'
-          }));
-        } catch (error) {
-          res.writeHead(400, { 'Content-Type': 'application/json' });
-          res.end(JSON.stringify({ error: 'Invalid JSON' }));
-        }
-      });
-    } else {
-      res.writeHead(405, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify({ error: 'Method not allowed' }));
-    }
-  } else if (parsedUrl.pathname === '/search') {
-    // Web search endpoint
-    const query = parsedUrl.query.q;
-    if (!query) {
-      res.writeHead(400, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify({ error: 'Query parameter (q) required' }));
-      return;
-    }
-    
+  } else if (parsedUrl.pathname === '/test-search') {
+    // Test search endpoint
+    const query = parsedUrl.query.q || 'current weather';
     try {
       const result = await performWebSearch(query);
       res.writeHead(200, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify(result));
     } catch (error) {
       res.writeHead(500, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify({ error: 'Search failed', details: error.message }));
+      res.end(JSON.stringify({ error: 'Test failed', details: error.message }));
     }
   } else {
     res.writeHead(200, { 'Content-Type': 'text/plain' });
@@ -209,14 +205,14 @@ const wss = new WebSocket.Server({ server });
 
 wss.on('connection', async (clientSocket, req) => {
   const clientId = randomBytes(4).toString('hex');
-  console.log(`\n📞 [${clientId}] New connection`);
+  console.log(`\n📞 [${clientId}] New connection from ${req.socket.remoteAddress}`);
   
   let openaiWs = null;
   let isMuted = false;
   let isReady = false;
   let isResponding = false;
   let messageQueue = [];
-  let currentLanguage = 'en'; // Default to English
+  let currentLanguage = 'en';
   
   try {
     const token = await getRealtimeToken();
@@ -234,56 +230,53 @@ wss.on('connection', async (clientSocket, req) => {
     openaiWs.on('open', () => {
       console.log(`✅ [${clientId}] Connected to OpenAI`);
       
-      // Configure session with DEFAULT LANGUAGE SET TO ENGLISH
+      // Configure session
       openaiWs.send(JSON.stringify({
         type: 'session.update',
         session: {
           modalities: ['text', 'audio'],
           instructions: `You are Life, a friendly AI voice assistant. 
           
-          IMPORTANT: You must ALWAYS speak in English by default. Only switch to other languages if explicitly requested by the user.
+          IMPORTANT RULES:
+          1. Always speak in English by default.
+          2. For current information (weather, news, sports, stocks), use the web_search tool.
+          3. If web_search fails, be honest and suggest checking online directly.
+          4. Keep responses concise (1-2 sentences for answers).
+          5. Be helpful and friendly.
           
-          You can search the web for real-time information using the web_search tool.
+          WEB SEARCH GUIDELINES:
+          - Weather: Ask for location if missing, then search "current weather in [location]"
+          - News: Search "latest news about [topic]"
+          - Sports: Search "latest scores [team/sport]"
+          - Stocks: Search "current stock price of [company]"
           
-          When users ask about:
-          - Weather (current weather, temperature, forecast)
-          - News (current events, breaking news)
-          - Sports (scores, schedules, results)
-          - Stocks (prices, market updates)
-          - Time-sensitive information
-          
-          You MUST use the web_search tool to get current information.
-          
-          For weather: Ask for location if not provided, then search for "current weather in [location]"
-          For news: Search for "latest news about [topic]"
-          For sports: Search for "latest scores [team/sport]"
-          
-          Keep responses concise, friendly, and conversational.`,
+          Example user question: "What's the weather?" 
+          Your action: Use web_search with query "current weather"`,
           voice: 'alloy',
           input_audio_format: 'pcm16',
           output_audio_format: 'pcm16',
           input_audio_transcription: {
             model: 'whisper-1',
-            language: 'en' // FORCE ENGLISH AS DEFAULT
+            language: 'en'
           },
           turn_detection: {
             type: 'server_vad',
             threshold: 0.5,
             prefix_padding_ms: 300,
-            silence_duration_ms: 1200
+            silence_duration_ms: 1000
           },
           temperature: 0.7,
           tools: [
             {
               type: 'function',
               name: 'web_search',
-              description: 'Search the web for current, real-time information. Use this for weather, news, sports, stocks, and any time-sensitive queries.',
+              description: 'Search for current, real-time information. Use for weather, news, sports, stocks, etc.',
               parameters: {
                 type: 'object',
                 properties: {
                   query: {
                     type: 'string',
-                    description: 'The search query to find current information (e.g., "current weather in London", "latest news about technology", "NBA scores today")'
+                    description: 'Search query (e.g., "current weather in London", "latest news", "NBA scores")'
                   }
                 },
                 required: ['query']
@@ -295,14 +288,9 @@ wss.on('connection', async (clientSocket, req) => {
       
       clientSocket.send(JSON.stringify({
         type: 'connected',
-        message: 'Connected to OpenAI with web search capabilities',
+        message: 'Connected to OpenAI',
         language: 'en',
-        voice: 'alloy',
-        capabilities: {
-          files: 'text_only',
-          web_search: true,
-          note: 'Can search for real-time weather, news, sports, and more'
-        }
+        voice: 'alloy'
       }));
     });
     
@@ -310,35 +298,35 @@ wss.on('connection', async (clientSocket, req) => {
       try {
         const message = JSON.parse(data.toString());
         
-        // LOG IMPORTANT MESSAGES FOR DEBUGGING
-        if (!['response.audio.delta'].includes(message.type)) {
+        // DEBUG: Log all non-audio messages
+        if (!['response.audio.delta', 'response.audio_transcript.delta'].includes(message.type)) {
           console.log(`🔵 [${clientId}] OpenAI: ${message.type}`);
-          if (['error', 'response.function_call_arguments.done', 'response.created', 'response.done'].includes(message.type)) {
-            console.log(`📋 [${clientId}] Message details:`, JSON.stringify(message, null, 2));
-          }
         }
         
-        // Session ready - process queue
+        // Critical debug messages
+        if (['error', 'response.function_call_arguments.done', 'conversation.item.input_audio_transcription.completed'].includes(message.type)) {
+          console.log(`📋 [${clientId}] ${message.type}:`, JSON.stringify(message, null, 2));
+        }
+        
+        // Session ready
         if (message.type === 'session.updated') {
-          console.log(`✅ [${clientId}] Session ready with English as default language`);
+          console.log(`✅ [${clientId}] Session ready`);
           isReady = true;
           
           // Process queued messages
           while (messageQueue.length > 0) {
             const queuedMsg = messageQueue.shift();
-            console.log(`⏳ [${clientId}] Processing queued: ${queuedMsg.type}`);
             handleClientMessage(queuedMsg);
           }
           
-          // Send greeting in English
+          // Send greeting
           setTimeout(() => {
             if (openaiWs.readyState === WebSocket.OPEN) {
-              console.log(`👋 [${clientId}] Sending English greeting...`);
               openaiWs.send(JSON.stringify({
                 type: 'response.create',
                 response: {
                   modalities: ['text', 'audio'],
-                  instructions: 'Greet the user in English. Say "Hello! I am Life, your AI assistant. I can help you with information, answer questions, and search the web for real-time data. What would you like to know today?" Keep it friendly and welcoming.'
+                  instructions: 'Greet the user in English. Say "Hello! I am Life, your AI assistant. I can help answer questions and search for current information. What would you like to know?"'
                 }
               }));
             }
@@ -374,12 +362,12 @@ wss.on('connection', async (clientSocket, req) => {
         // Response done
         if (message.type === 'response.done') {
           isResponding = false;
-          console.log(`⏹️ [${clientId}] Response completed - ready for next input`);
+          console.log(`⏹️ [${clientId}] Response completed`);
         }
         
         // Transcriptions
         if (message.type === 'conversation.item.input_audio_transcription.completed') {
-          console.log(`📝 [${clientId}] User: "${message.transcript}"`);
+          console.log(`📝 [${clientId}] User said: "${message.transcript}"`);
           clientSocket.send(JSON.stringify({
             type: 'transcript',
             role: 'user',
@@ -389,7 +377,7 @@ wss.on('connection', async (clientSocket, req) => {
         }
         
         if (message.type === 'response.audio_transcript.done') {
-          console.log(`🤖 [${clientId}] AI: "${message.transcript}"`);
+          console.log(`🤖 [${clientId}] AI said: "${message.transcript}"`);
           clientSocket.send(JSON.stringify({
             type: 'transcript',
             role: 'assistant',
@@ -398,7 +386,7 @@ wss.on('connection', async (clientSocket, req) => {
           }));
         }
         
-        // Function calls - web search
+        // Function calls
         if (message.type === 'response.function_call_arguments.done') {
           console.log(`🔧 [${clientId}] Function call: ${message.name}`);
           
@@ -407,26 +395,27 @@ wss.on('connection', async (clientSocket, req) => {
               const args = JSON.parse(message.arguments);
               console.log(`🔍 [${clientId}] Web search query: "${args.query}"`);
               
-              // Perform web search
+              // Perform search
               performWebSearch(args.query).then(searchResult => {
-                console.log(`✅ [${clientId}] Search completed, sending result back`);
+                console.log(`✅ [${clientId}] Search result: ${searchResult.success ? 'Success' : 'Failed'}`);
                 
-                // Send function result back to OpenAI
+                const output = searchResult.success ? 
+                  `Based on my search for "${args.query}": ${searchResult.result}` : 
+                  searchResult.fallback;
+                
+                // Send result back
                 openaiWs.send(JSON.stringify({
                   type: 'conversation.item.create',
                   item: {
                     type: 'function_call_output',
                     call_id: message.call_id,
-                    output: searchResult.success ? 
-                      `Search results for "${args.query}":\n${searchResult.result}` : 
-                      searchResult.fallback
+                    output: output
                   }
                 }));
                 
-                // Wait a moment then trigger response with the search result
+                // Trigger response
                 setTimeout(() => {
                   if (openaiWs.readyState === WebSocket.OPEN) {
-                    console.log(`🚀 [${clientId}] Triggering response with search results`);
                     openaiWs.send(JSON.stringify({
                       type: 'response.create'
                     }));
@@ -434,15 +423,14 @@ wss.on('connection', async (clientSocket, req) => {
                 }, 100);
                 
               }).catch(error => {
-                console.error(`❌ [${clientId}] Search failed:`, error);
+                console.error(`❌ [${clientId}] Search promise error:`, error);
                 
-                // Send error back
                 openaiWs.send(JSON.stringify({
                   type: 'conversation.item.create',
                   item: {
                     type: 'function_call_output',
                     call_id: message.call_id,
-                    output: `I couldn't search for "${args.query}" right now. Please try again or check online directly.`
+                    output: `I encountered an error while searching for "${args.query}". Please try asking again or check online.`
                   }
                 }));
                 
@@ -461,19 +449,10 @@ wss.on('connection', async (clientSocket, req) => {
           }
         }
         
-        // Function call output created
-        if (message.type === 'conversation.item.created' && message.item?.type === 'function_call_output') {
-          console.log(`📤 [${clientId}] Function output created`);
-        }
-        
         // Errors
         if (message.type === 'error') {
           console.error(`❌ [${clientId}] OpenAI error:`, message.error);
           isResponding = false;
-          clientSocket.send(JSON.stringify({
-            type: 'error',
-            message: message.error?.message || 'Unknown error'
-          }));
         }
         
       } catch (error) {
@@ -508,27 +487,72 @@ wss.on('connection', async (clientSocket, req) => {
       return;
     }
     
-    // Mute/Unmute
+    console.log(`📤 [${clientId}] Handling: ${message.type}`);
+    
+    // Audio streaming
+    if (message.type === 'audio' && message.data && !isMuted) {
+      // DEBUG: Log first few bytes of audio
+      if (message.data.length > 0) {
+        console.log(`🎤 [${clientId}] Audio: ${message.data.substring(0, 20)}... (${message.data.length} bytes)`);
+      }
+      
+      openaiWs.send(JSON.stringify({
+        type: 'input_audio_buffer.append',
+        audio: message.data
+      }));
+      return;
+    }
+    
+    // Text messages
+    if (message.type === 'text_message' && message.text) {
+      console.log(`💬 [${clientId}] Text: "${message.text}"`);
+      
+      if (isResponding) {
+        console.log(`⏳ [${clientId}] Skipping - response in progress`);
+        return;
+      }
+      
+      // Clear audio buffer
+      openaiWs.send(JSON.stringify({ type: 'input_audio_buffer.clear' }));
+      
+      // Create conversation item
+      openaiWs.send(JSON.stringify({
+        type: 'conversation.item.create',
+        item: {
+          type: 'message',
+          role: 'user',
+          content: [{ type: 'input_text', text: message.text }]
+        }
+      }));
+      
+      // Trigger response
+      setTimeout(() => {
+        if (openaiWs.readyState === WebSocket.OPEN && !isResponding) {
+          openaiWs.send(JSON.stringify({ 
+            type: 'response.create'
+          }));
+        }
+      }, 200);
+      
+      return;
+    }
+    
+    // Other message types...
     if (message.type === 'mute') {
       isMuted = true;
       console.log(`🔇 [${clientId}] Muted`);
-      clientSocket.send(JSON.stringify({ type: 'muted', muted: true }));
       return;
     }
     
     if (message.type === 'unmute') {
       isMuted = false;
       console.log(`🔊 [${clientId}] Unmuted`);
-      clientSocket.send(JSON.stringify({ type: 'muted', muted: false }));
       return;
     }
     
-    // Language change request
     if (message.type === 'set_language' && message.language) {
-      console.log(`🌐 [${clientId}] Language change requested: ${message.language}`);
+      console.log(`🌐 [${clientId}] Language change: ${message.language}`);
       currentLanguage = message.language;
-      
-      // Update session language
       openaiWs.send(JSON.stringify({
         type: 'session.update',
         session: {
@@ -538,172 +562,17 @@ wss.on('connection', async (clientSocket, req) => {
           }
         }
       }));
-      
-      // Also update instructions to reflect language change
-      openaiWs.send(JSON.stringify({
-        type: 'conversation.item.create',
-        item: {
-          type: 'message',
-          role: 'user',
-          content: [{ type: 'input_text', text: `Please switch to speaking in ${getLanguageName(message.language)}.` }]
-        }
-      }));
-      
-      // Respond in the new language
-      setTimeout(() => {
-        if (openaiWs.readyState === WebSocket.OPEN) {
-          openaiWs.send(JSON.stringify({ 
-            type: 'response.create',
-            response: {
-              modalities: ['text', 'audio'],
-              instructions: `Confirm that you have switched to ${getLanguageName(message.language)} and ask how you can help in that language.`
-            }
-          }));
-        }
-      }, 200);
-      
-      clientSocket.send(JSON.stringify({
-        type: 'language_set',
-        language: message.language,
-        name: getLanguageName(message.language)
-      }));
       return;
     }
-    
-    // Text messages
-    if (message.type === 'text_message' && message.text) {
-      console.log(`💬 [${clientId}] Text in ${currentLanguage}: "${message.text.substring(0, 100)}..."`);
-      
-      if (isResponding) {
-        console.log(`⏳ [${clientId}] Skipping - response in progress`);
-        clientSocket.send(JSON.stringify({
-          type: 'warning',
-          message: 'Please wait for the current response to finish'
-        }));
-        return;
-      }
-      
-      // Clear audio buffer first
-      openaiWs.send(JSON.stringify({ type: 'input_audio_buffer.clear' }));
-      
-      // Append file text content if provided
-      let fullText = message.text;
-      if (message.files && message.files.length > 0) {
-        console.log(`📎 [${clientId}] Processing ${message.files.length} file(s) as text`);
-        for (const file of message.files) {
-          if (file.text || file.content) {
-            const fileText = file.text || file.content || '';
-            const fileName = file.name || 'File';
-            fullText += `\n\n[Content from ${fileName}]:\n${fileText}`;
-          }
-        }
-      }
-      
-      // Create conversation item
-      openaiWs.send(JSON.stringify({
-        type: 'conversation.item.create',
-        item: {
-          type: 'message',
-          role: 'user',
-          content: [{ type: 'input_text', text: fullText }]
-        }
-      }));
-      
-      // Trigger response
-      setTimeout(() => {
-        if (openaiWs.readyState === WebSocket.OPEN && !isResponding) {
-          console.log(`🚀 [${clientId}] Creating response...`);
-          openaiWs.send(JSON.stringify({ 
-            type: 'response.create',
-            response: {
-              modalities: ['text', 'audio']
-            }
-          }));
-        }
-      }, 200);
-      
-      // Echo to client
-      clientSocket.send(JSON.stringify({
-        type: 'transcript',
-        role: 'user',
-        text: message.text,
-        language: currentLanguage
-      }));
-      
-      return;
-    }
-    
-    // Audio streaming
-    if (message.type === 'audio' && message.data && !isMuted) {
-      openaiWs.send(JSON.stringify({
-        type: 'input_audio_buffer.append',
-        audio: message.data
-      }));
-      return;
-    }
-    
-    // Cancel current response
-    if (message.type === 'cancel') {
-      console.log(`⏹️ [${clientId}] Cancelling current response`);
-      if (isResponding) {
-        openaiWs.send(JSON.stringify({
-          type: 'response.cancel'
-        }));
-      }
-      return;
-    }
-    
-    // Clear conversation
-    if (message.type === 'clear') {
-      console.log(`🧹 [${clientId}] Clearing conversation`);
-      openaiWs.send(JSON.stringify({
-        type: 'conversation.clear'
-      }));
-      
-      // Reset language to English after clearing
-      currentLanguage = 'en';
-      openaiWs.send(JSON.stringify({
-        type: 'session.update',
-        session: {
-          input_audio_transcription: {
-            model: 'whisper-1',
-            language: 'en'
-          }
-        }
-      }));
-      
-      clientSocket.send(JSON.stringify({
-        type: 'conversation_cleared',
-        language: 'en'
-      }));
-      return;
-    }
-  }
-  
-  // Helper function to get language name from code
-  function getLanguageName(code) {
-    const languages = {
-      'en': 'English',
-      'es': 'Spanish',
-      'fr': 'French',
-      'de': 'German',
-      'it': 'Italian',
-      'pt': 'Portuguese',
-      'ru': 'Russian',
-      'zh': 'Chinese',
-      'ja': 'Japanese',
-      'ko': 'Korean',
-      'hi': 'Hindi',
-      'ar': 'Arabic'
-    };
-    return languages[code] || code;
   }
   
   // Client message handler
   clientSocket.on('message', (data) => {
     try {
       const message = JSON.parse(data.toString());
-      console.log(`📥 [${clientId}] Received ${message.type}, isReady: ${isReady}`);
+      
+      // DEBUG: Log all incoming messages
+      console.log(`📥 [${clientId}] Received: ${message.type}, isReady: ${isReady}`);
       
       if (isReady) {
         handleClientMessage(message);
@@ -731,15 +600,14 @@ wss.on('connection', async (clientSocket, req) => {
 server.listen(PORT, '0.0.0.0', () => {
   console.log(`\n✅ Server running on port ${PORT}`);
   console.log(`🔗 WebSocket ready at ws://localhost:${PORT}`);
-  console.log(`🌐 Default language: English (en) - FORCED`);
+  console.log(`🌐 Default language: English (en)`);
   console.log(`🎙️  Voice: alloy`);
-  console.log(`🔍 Web search: ENABLED via LLM with internet context`);
-  console.log(`📤 File upload endpoint: http://localhost:${PORT}/upload`);
-  console.log(`🔎 Search endpoint: http://localhost:${PORT}/search?q=your+query`);
-  console.log(`\n🎤 Ready for voice conversations with real-time web search...\n`);
+  console.log(`🔍 Web search: ENABLED (with fallback)`);
+  console.log(`🩺 Health check: http://localhost:${PORT}/health`);
+  console.log(`🧪 Test search: http://localhost:${PORT}/test-search?q=weather`);
+  console.log(`\n🎤 Ready for voice conversations...\n`);
 });
 
-// Graceful shutdown
 process.on('SIGINT', () => {
   console.log('\n🔴 Shutting down...');
   wss.close();
