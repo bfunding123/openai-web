@@ -2,6 +2,7 @@ const http = require('http');
 const WebSocket = require('ws');
 const https = require('https');
 const { randomBytes } = require('crypto');
+const { parse } = require('url');
 
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
 const PORT = process.env.PORT || 3000;
@@ -13,6 +14,7 @@ if (!OPENAI_API_KEY) {
   process.exit(1);
 }
 
+// Get ephemeral token
 async function getRealtimeToken() {
   return new Promise((resolve, reject) => {
     console.log('🔑 Requesting ephemeral token...');
@@ -65,7 +67,9 @@ async function getRealtimeToken() {
   });
 }
 
-const server = http.createServer((req, res) => {
+// Create HTTP server
+const server = http.createServer(async (req, res) => {
+  const parsedUrl = parse(req.url, true);
   res.setHeader('Access-Control-Allow-Origin', '*');
   res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
   res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
@@ -79,12 +83,54 @@ const server = http.createServer((req, res) => {
   if (req.url === '/health') {
     res.writeHead(200, { 'Content-Type': 'application/json' });
     res.end(JSON.stringify({ status: 'ok', timestamp: new Date().toISOString() }));
+  } else if (parsedUrl.pathname === '/upload') {
+    // Simple file upload handler for demo purposes
+    // In production, use proper file storage like S3, Cloudinary, etc.
+    if (req.method === 'POST') {
+      let body = '';
+      req.on('data', chunk => { body += chunk; });
+      req.on('end', () => {
+        try {
+          const data = JSON.parse(body);
+          const { filename, contentType, base64Data } = data;
+          
+          if (!filename || !base64Data) {
+            res.writeHead(400, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ error: 'Missing filename or data' }));
+            return;
+          }
+          
+          // For demo, we'll just echo back a mock URL
+          // In production, upload to actual storage and return real URL
+          const fileId = randomBytes(8).toString('hex');
+          const mockUrl = `https://api.example.com/uploads/${fileId}/${encodeURIComponent(filename)}`;
+          
+          console.log(`📤 Mock upload: ${filename} -> ${mockUrl}`);
+          
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({
+            success: true,
+            filename: filename,
+            url: mockUrl,
+            contentType: contentType || 'application/octet-stream',
+            id: fileId
+          }));
+        } catch (error) {
+          res.writeHead(400, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ error: 'Invalid JSON' }));
+        }
+      });
+    } else {
+      res.writeHead(405, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: 'Method not allowed' }));
+    }
   } else {
     res.writeHead(200, { 'Content-Type': 'text/plain' });
     res.end('Realtime Voice Server\n');
   }
 });
 
+// Create WebSocket server
 const wss = new WebSocket.Server({ server });
 
 wss.on('connection', async (clientSocket, req) => {
@@ -112,6 +158,7 @@ wss.on('connection', async (clientSocket, req) => {
     openaiWs.on('open', () => {
       console.log(`✅ [${clientId}] Connected to OpenAI`);
       
+      // Configure session to support all modalities including images
       openaiWs.send(JSON.stringify({
         type: 'session.update',
         session: {
@@ -130,7 +177,8 @@ wss.on('connection', async (clientSocket, req) => {
             prefix_padding_ms: 300,
             silence_duration_ms: 500
           },
-          temperature: 0.8
+          temperature: 0.8,
+          tools: [] // Ensure tools are properly configured if needed
         }
       }));
       
@@ -146,16 +194,19 @@ wss.on('connection', async (clientSocket, req) => {
       try {
         const message = JSON.parse(data.toString());
         
+        // Session ready - process queue
         if (message.type === 'session.updated') {
-          console.log(`✅ [${clientId}] Session ready`);
+          console.log(`✅ [${clientId}] Session ready (English language mode)`);
           isReady = true;
           
+          // Process queued messages
           while (messageQueue.length > 0) {
             const queuedMsg = messageQueue.shift();
             console.log(`⏳ [${clientId}] Processing queued: ${queuedMsg.type}`);
             handleClientMessage(queuedMsg);
           }
           
+          // Send English greeting
           setTimeout(() => {
             if (openaiWs.readyState === WebSocket.OPEN) {
               openaiWs.send(JSON.stringify({
@@ -169,6 +220,7 @@ wss.on('connection', async (clientSocket, req) => {
           }, 500);
         }
         
+        // VAD events
         if (message.type === 'input_audio_buffer.speech_started') {
           console.log(`🎤 [${clientId}] Speech started`);
           clientSocket.send(JSON.stringify({ type: 'vad_start' }));
@@ -179,6 +231,7 @@ wss.on('connection', async (clientSocket, req) => {
           clientSocket.send(JSON.stringify({ type: 'vad_stop' }));
         }
         
+        // Audio output
         if (message.type === 'response.audio.delta' && message.delta) {
           clientSocket.send(JSON.stringify({
             type: 'audio',
@@ -187,8 +240,9 @@ wss.on('connection', async (clientSocket, req) => {
           }));
         }
         
+        // Transcriptions
         if (message.type === 'conversation.item.input_audio_transcription.completed') {
-          console.log(`📝 [${clientId}] User: ${message.transcript}`);
+          console.log(`📝 [${clientId}] User (English): ${message.transcript}`);
           clientSocket.send(JSON.stringify({
             type: 'transcript',
             role: 'user',
@@ -198,7 +252,7 @@ wss.on('connection', async (clientSocket, req) => {
         }
         
         if (message.type === 'response.audio_transcript.done') {
-          console.log(`🤖 [${clientId}] AI: ${message.transcript}`);
+          console.log(`🤖 [${clientId}] AI (English): ${message.transcript}`);
           clientSocket.send(JSON.stringify({
             type: 'transcript',
             role: 'assistant',
@@ -207,6 +261,12 @@ wss.on('connection', async (clientSocket, req) => {
           }));
         }
         
+        // Handle tool calls if needed (for image analysis)
+        if (message.type === 'conversation.item.create' && message.item?.role === 'assistant') {
+          console.log(`🤖 [${clientId}] Assistant message created`);
+        }
+        
+        // Errors
         if (message.type === 'error') {
           console.error(`❌ [${clientId}] OpenAI error:`, message.error);
           clientSocket.send(JSON.stringify({
@@ -239,12 +299,14 @@ wss.on('connection', async (clientSocket, req) => {
     return;
   }
   
+  // Handle client messages
   function handleClientMessage(message) {
     if (!openaiWs || openaiWs.readyState !== WebSocket.OPEN) {
       console.error(`❌ [${clientId}] OpenAI not connected`);
       return;
     }
     
+    // Mute/Unmute
     if (message.type === 'mute') {
       isMuted = true;
       console.log(`🔇 [${clientId}] Muted`);
@@ -259,99 +321,188 @@ wss.on('connection', async (clientSocket, req) => {
       return;
     }
     
-    if (message.type === 'text_message') {
-      console.log(`💬 [${clientId}] Text: ${message.text?.substring(0, 50) || '(files only)'}...`);
+    // Text messages with optional files
+    if (message.type === 'text_message' && message.text) {
+      console.log(`💬 [${clientId}] Text (English): ${message.text.substring(0, 100)}...`);
       
+      // Clear audio buffer first
       openaiWs.send(JSON.stringify({ type: 'input_audio_buffer.clear' }));
       
-      let fullText = message.text || 'Please review these files:';
+      // Create content array starting with text
+      const content = [{ type: 'input_text', text: message.text }];
       
+      // Append files if provided
       if (message.files && message.files.length > 0) {
-        console.log(`📎 [${clientId}] Processing ${message.files.length} files`);
+        console.log(`📎 [${clientId}] Processing ${message.files.length} file(s)`);
         
         for (const file of message.files) {
-          const extractedContent = file.content || file.text;
-          
-          if (extractedContent && extractedContent.trim()) {
-            console.log(`✅ [${clientId}] ${file.name}: ${extractedContent.length} chars`);
-            fullText += `\n\n--- FILE: ${file.name} ---\n${extractedContent}\n--- END OF FILE ---`;
-          } else {
-            console.log(`⚠️ [${clientId}] ${file.name}: No content`);
-            fullText += `\n\n[File: ${file.name} - extraction failed]`;
+          // Handle images via URL
+          if (file.url && (file.type?.startsWith('image/') || file.mimeType?.startsWith('image/'))) {
+            content.push({
+              type: 'input_image',
+              image_url: file.url
+            });
+            console.log(`🖼️  [${clientId}] Added image: ${file.name || 'unnamed'}`);
+          }
+          // Handle audio via URL
+          else if (file.url && (file.type?.startsWith('audio/') || file.mimeType?.startsWith('audio/'))) {
+            content.push({
+              type: 'input_audio',
+              audio_url: file.url
+            });
+            console.log(`🎵 [${clientId}] Added audio: ${file.name || 'unnamed'}`);
+          }
+          // Handle documents via URL
+          else if (file.url) {
+            content.push({
+              type: 'input_document',
+              document_url: file.url
+            });
+            console.log(`📄 [${clientId}] Added document: ${file.name || 'unnamed'}`);
+          }
+          // Handle text content directly
+          else if (file.content || file.text) {
+            const fileText = file.content || file.text;
+            const fileName = file.name || 'File';
+            content.push({
+              type: 'input_text',
+              text: `[${fileName}]:\n${fileText}`
+            });
+            console.log(`📝 [${clientId}] Added file content: ${fileName}`);
+          }
+          // Handle base64 images
+          else if (file.base64 && file.type?.startsWith('image/')) {
+            // Note: OpenAI Realtime API might not support base64 directly
+            // You'd need to upload to a URL first
+            console.warn(`⚠️ [${clientId}] Base64 images need to be uploaded first`);
+            clientSocket.send(JSON.stringify({
+              type: 'error',
+              message: 'Base64 images need to be uploaded to a URL first'
+            }));
           }
         }
       }
       
+      // Create conversation item with all content
       openaiWs.send(JSON.stringify({
         type: 'conversation.item.create',
         item: {
           type: 'message',
           role: 'user',
-          content: [{ type: 'input_text', text: fullText }]
+          content: content
         }
       }));
       
+      // Trigger response
       setTimeout(() => {
         openaiWs.send(JSON.stringify({ 
           type: 'response.create',
-          response: { modalities: ['text', 'audio'] }
+          response: {
+            modalities: ['text', 'audio']
+          }
         }));
-      }, 50);
+      }, 100);
       
-      if (message.text) {
-        clientSocket.send(JSON.stringify({
-          type: 'transcript',
-          role: 'user',
-          text: message.text,
-          language: 'en'
-        }));
-      }
-      
-      console.log(`✅ [${clientId}] Sent ${fullText.length} chars to OpenAI`);
-      return;
-    }
-    
-    if (message.type === 'attachment' && message.filename) {
-      console.log(`📎 [${clientId}] Attachment: ${message.filename}`);
-      
-      openaiWs.send(JSON.stringify({ type: 'input_audio_buffer.clear' }));
-      
-      const extractedContent = message.content || message.text;
-      let text = '';
-      
-      if (extractedContent && extractedContent.trim()) {
-        console.log(`✅ [${clientId}] ${message.filename}: ${extractedContent.length} chars`);
-        text = `--- FILE: ${message.filename} ---\n${extractedContent}\n--- END OF FILE ---\n\nPlease analyze this content.`;
-      } else {
-        console.log(`⚠️ [${clientId}] ${message.filename}: No content`);
-        text = `[File: ${message.filename} - extraction failed. Please inform the user.]`;
-      }
-      
-      openaiWs.send(JSON.stringify({
-        type: 'conversation.item.create',
-        item: {
-          type: 'message',
-          role: 'user',
-          content: [{ type: 'input_text', text }]
-        }
-      }));
-      
-      setTimeout(() => {
-        openaiWs.send(JSON.stringify({ 
-          type: 'response.create',
-          response: { modalities: ['text', 'audio'] }
-        }));
-      }, 50);
-      
+      // Echo to client
       clientSocket.send(JSON.stringify({
-        type: 'attachment_received',
-        filename: message.filename,
+        type: 'transcript',
+        role: 'user',
+        text: message.text,
         language: 'en'
       }));
       
       return;
     }
     
+    // Standalone attachment
+    if (message.type === 'attachment') {
+      console.log(`📎 [${clientId}] Processing attachment`);
+      
+      openaiWs.send(JSON.stringify({ type: 'input_audio_buffer.clear' }));
+      
+      const content = [];
+      
+      // Handle different attachment types
+      if (message.url) {
+        if (message.type && message.type.startsWith('image/') || message.mimeType?.startsWith('image/')) {
+          content.push({
+            type: 'input_image',
+            image_url: message.url
+          });
+          console.log(`🖼️  [${clientId}] Processing image: ${message.filename || 'unnamed'}`);
+        }
+        else if (message.type && message.type.startsWith('audio/') || message.mimeType?.startsWith('audio/')) {
+          content.push({
+            type: 'input_audio',
+            audio_url: message.url
+          });
+          console.log(`🎵 [${clientId}] Processing audio: ${message.filename || 'unnamed'}`);
+        }
+        else {
+          content.push({
+            type: 'input_document',
+            document_url: message.url
+          });
+          console.log(`📄 [${clientId}] Processing document: ${message.filename || 'unnamed'}`);
+        }
+      }
+      else if (message.content || message.text) {
+        const fileContent = message.content || message.text || '';
+        const fileName = message.filename || 'Attachment';
+        content.push({
+          type: 'input_text',
+          text: `${fileName}:\n${fileContent}`
+        });
+        console.log(`📝 [${clientId}] Processing text attachment: ${fileName}`);
+      }
+      else if (message.base64 && (message.type?.startsWith('image/') || message.mimeType?.startsWith('image/'))) {
+        console.warn(`⚠️ [${clientId}] Base64 images need URL upload first`);
+        clientSocket.send(JSON.stringify({
+          type: 'error',
+          message: 'Please upload the image first using /upload endpoint'
+        }));
+        return;
+      }
+      
+      if (content.length === 0) {
+        console.error(`❌ [${clientId}] No valid content in attachment`);
+        clientSocket.send(JSON.stringify({
+          type: 'error',
+          message: 'Attachment has no valid content'
+        }));
+        return;
+      }
+      
+      // Create conversation item
+      openaiWs.send(JSON.stringify({
+        type: 'conversation.item.create',
+        item: {
+          type: 'message',
+          role: 'user',
+          content: content
+        }
+      }));
+      
+      // Trigger response
+      setTimeout(() => {
+        openaiWs.send(JSON.stringify({ 
+          type: 'response.create',
+          response: {
+            modalities: ['text', 'audio']
+          }
+        }));
+      }, 100);
+      
+      clientSocket.send(JSON.stringify({
+        type: 'attachment_received',
+        filename: message.filename || 'attachment',
+        language: 'en'
+      }));
+      
+      return;
+    }
+    
+    // Audio streaming (only if not muted)
     if (message.type === 'audio' && message.data && !isMuted) {
       openaiWs.send(JSON.stringify({
         type: 'input_audio_buffer.append',
@@ -360,16 +511,45 @@ wss.on('connection', async (clientSocket, req) => {
       return;
     }
     
-    if (message.type === 'set_language' && message.language === 'en') {
-      console.log(`🌐 [${clientId}] Language set to English`);
+    // Language change request
+    if (message.type === 'set_language' && message.language) {
+      console.log(`🌐 [${clientId}] Language change requested: ${message.language}`);
+      
+      // Update session language
+      openaiWs.send(JSON.stringify({
+        type: 'session.update',
+        session: {
+          input_audio_transcription: {
+            model: 'whisper-1',
+            language: message.language
+          }
+        }
+      }));
+      
       clientSocket.send(JSON.stringify({
         type: 'language_set',
-        language: 'en'
+        language: message.language
+      }));
+      return;
+    }
+    
+    // Clear conversation
+    if (message.type === 'clear') {
+      console.log(`🧹 [${clientId}] Clearing conversation`);
+      
+      // Clear all conversation items
+      openaiWs.send(JSON.stringify({
+        type: 'conversation.clear'
+      }));
+      
+      clientSocket.send(JSON.stringify({
+        type: 'conversation_cleared'
       }));
       return;
     }
   }
   
+  // Client message handler
   clientSocket.on('message', (data) => {
     try {
       const message = JSON.parse(data.toString());
@@ -377,6 +557,7 @@ wss.on('connection', async (clientSocket, req) => {
       if (isReady) {
         handleClientMessage(message);
       } else {
+        // Queue until ready
         messageQueue.push(message);
         console.log(`⏳ [${clientId}] Queued: ${message.type}`);
       }
@@ -396,14 +577,17 @@ wss.on('connection', async (clientSocket, req) => {
   });
 });
 
+// Start server
 server.listen(PORT, '0.0.0.0', () => {
   console.log(`\n✅ Server running on port ${PORT}`);
   console.log(`🔗 WebSocket ready at ws://localhost:${PORT}`);
-  console.log(`🌐 Language: English`);
-  console.log(`🎙️ Voice: alloy`);
-  console.log(`📎 File extraction: enabled\n`);
+  console.log(`🌐 Default language: English (en)`);
+  console.log(`🎙️  Voice: alloy`);
+  console.log(`📤 File upload endpoint: http://localhost:${PORT}/upload`);
+  console.log('\n🎤 Ready for voice conversations...\n');
 });
 
+// Graceful shutdown
 process.on('SIGINT', () => {
   console.log('\n🔴 Shutting down...');
   wss.close();
