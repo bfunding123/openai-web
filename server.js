@@ -459,11 +459,20 @@ wss.on('connection', async (clientSocket, req) => {
     
     // Audio streaming (only if not muted)
     if (message.type === 'audio' && message.data && !isMuted) {
+      console.log(`🎤 [${clientId}] Sending audio to OpenAI: ${message.data.length} bytes, muted=${isMuted}`);
       openaiWs.send(JSON.stringify({
         type: 'input_audio_buffer.append',
         audio: message.data
       }));
       return;
+    }
+    
+    // Log if audio was skipped
+    if (message.type === 'audio' && !message.data) {
+      console.log(`⚠️ [${clientId}] Audio message received but no data`);
+    }
+    if (message.type === 'audio' && isMuted) {
+      console.log(`🔇 [${clientId}] Audio skipped - muted`);
     }
     
     // Cancel current response
