@@ -198,6 +198,11 @@ wss.on('connection', async (clientSocket, req) => {
       try {
         const message = JSON.parse(data.toString());
         
+        // LOG ALL MESSAGE TYPES FOR DEBUGGING
+        if (!['response.audio.delta'].includes(message.type)) {
+          console.log(`🔵 [${clientId}] OpenAI message type: ${message.type}`, message.type === 'error' ? message : '');
+        }
+        
         // Session ready - process queue
         if (message.type === 'session.updated') {
           console.log(`✅ [${clientId}] Session ready - VAD configured with 5s silence timeout`);
