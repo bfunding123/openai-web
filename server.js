@@ -141,6 +141,7 @@ wss.on('connection', async (clientSocket, req) => {
   let isReady = false;
   let isResponding = false;
   let messageQueue = [];
+  let audioQueue = []; // ADDED: Queue for audio data
   
   try {
     const token = await getRealtimeToken();
@@ -175,9 +176,9 @@ wss.on('connection', async (clientSocket, req) => {
           },
           turn_detection: {
             type: 'server_vad',
-            threshold: 0.6,
+            threshold: 0.5, // Lowered for better sensitivity
             prefix_padding_ms: 300,
-            silence_duration_ms: 800
+            silence_duration_ms: 700 // Adjusted for better conversation flow
           },
           temperature: 0.8,
           tools: []
@@ -212,6 +213,20 @@ wss.on('connection', async (clientSocket, req) => {
             handleClientMessage(queuedMsg);
           }
           
+          // Process buffered audio
+          if (audioQueue.length > 0) {
+            console.log(`🎤 [${clientId}] Processing ${audioQueue.length} buffered audio chunks`);
+            for (const audioData of audioQueue) {
+              if (openaiWs.readyState === WebSocket.OPEN && !isMuted) {
+                openaiWs.send(JSON.stringify({
+                  type: 'input_audio_buffer.append',
+                  audio: audioData.data
+                }));
+              }
+            }
+            audioQueue = [];
+          }
+          
           // Send English greeting
           setTimeout(() => {
             if (openaiWs.readyState === WebSocket.OPEN) {
@@ -223,7 +238,7 @@ wss.on('connection', async (clientSocket, req) => {
                 }
               }));
             }
-          }, 500);
+          }, 1000); // Increased delay for better UX
         }
         
         // VAD events
@@ -256,6 +271,13 @@ wss.on('connection', async (clientSocket, req) => {
         if (message.type === 'response.done') {
           isResponding = false;
           console.log(`⏹️ [${clientId}] Response completed`);
+          
+          // Clear audio buffer to prevent carryover
+          if (openaiWs.readyState === WebSocket.OPEN) {
+            setTimeout(() => {
+              openaiWs.send(JSON.stringify({ type: 'input_audio_buffer.clear' }));
+            }, 100);
+          }
         }
         
         // Response cancelled
@@ -400,7 +422,7 @@ wss.on('connection', async (clientSocket, req) => {
             }
           }));
         }
-      }, 200);
+      }, 300);
       
       // Echo to client
       clientSocket.send(JSON.stringify({
@@ -444,17 +466,24 @@ wss.on('connection', async (clientSocket, req) => {
             }
           }));
         }
-      }, 200);
+      }, 300);
       
       return;
     }
     
     // Audio streaming (only if not muted)
     if (message.type === 'audio' && message.data && !isMuted) {
-      openaiWs.send(JSON.stringify({
-        type: 'input_audio_buffer.append',
-        audio: message.data
-      }));
+      if (isReady) {
+        // Send directly if session is ready
+        openaiWs.send(JSON.stringify({
+          type: 'input_audio_buffer.append',
+          audio: message.data
+        }));
+      } else {
+        // Buffer audio until session is ready
+        audioQueue.push({ type: 'audio', data: message.data });
+        console.log(`🎤 [${clientId}] Buffered audio chunk (queue: ${audioQueue.length})`);
+      }
       return;
     }
     
@@ -515,10 +544,13 @@ wss.on('connection', async (clientSocket, req) => {
       if (isReady) {
         handleClientMessage(message);
       } else {
-        // Queue until ready (except audio which we can buffer)
+        // Queue until ready
         if (message.type === 'audio') {
-          // Buffer audio in WebSocket connection itself
-          console.log(`🎤 [${clientId}] Buffering audio (not ready yet)`);
+          // Buffer audio in dedicated queue
+          if (message.data && !isMuted) {
+            audioQueue.push(message);
+            console.log(`🎤 [${clientId}] Queued audio (queue: ${audioQueue.length})`);
+          }
         } else {
           messageQueue.push(message);
           console.log(`⏳ [${clientId}] Queued: ${message.type}`);
@@ -559,4 +591,3 @@ process.on('SIGINT', () => {
   server.close();
   process.exit(0);
 });
-
